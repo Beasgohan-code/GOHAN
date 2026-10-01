@@ -1,0 +1,17 @@
+# Runtime requirements for GOHAN.
+# Python 3.11+ (3.12 recommended).
+aiogram>=3.31,<4
+pydantic-settings>=2.5,<3
+aiosqlite>=0.20
+aiohttp>=3.10
+# Rich Messages helper by BadmundaXd - MIT, works with Kurigram/Pyrogram.
+richgram>=0.2.0
+# MTProto: 2 GB transfers, history, restricted chats. Optional at runtime
+# (MTPROTO_MODE=off disables it) but installed by default.
+kurigram>=2.2.26
+# Optional but strongly recommended: C-speed MTProto crypto. If a wheel is not
+# available for your platform, drop this line - Kurigram works without it.
+TgCrypto>=1.2.5
+# Music (/music, /download). Optional - the command degrades to search links.
+# yt-dlp also needs the ffmpeg binary: `apt install ffmpeg` / `brew install ffmpeg`.
+# yt-dlp>=2024.8.6

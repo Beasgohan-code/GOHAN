@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gohan"
+version = "0.1.0"
+description = "GOHAN — an AI, anime, music, notes, filters, fun and guardian Telegram bot on aiogram 3 (Bot API 10.x) + Kurigram (MTProto)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+dependencies = [
+    "aiogram>=3.31,<4",
+    "kurigram>=2.2.26",
+    "pydantic-settings>=2.5,<3",
+    "aiosqlite>=0.20",
+    "aiohttp>=3.10",
+    "richgram>=0.2.0",
+]
+
+[project.optional-dependencies]
+# C-speed MTProto crypto + libc-ares resolver for Kurigram.
+fast = ["TgCrypto>=1.2.5"]
+# Music downloads (/music, /download). Needs the ffmpeg binary on the host too.
+media = ["yt-dlp>=2024.8.6"]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[project.scripts]
+gohan = "gohan.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["gohan"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning:gohan.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
+ignore = ["E501", "B008"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_ignores = true
+ignore_missing_imports = true
