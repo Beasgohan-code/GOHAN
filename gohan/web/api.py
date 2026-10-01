@@ -13,6 +13,12 @@ Route map::
     POST /api/groups/{id}/modules/{key}   {"enabled": true|false}
     GET  /api/modules          the module registry with current state
     POST /api/modules/{key}    toggle a global switch
+    POST /api/modules/{key}/apply-all    turn a chat module on/off in every group
+    GET  /api/moderation       warning counts, a per-day chart and recent cases
+    GET  /api/users            search users (q, banned)
+    GET  /api/users/{id}       one user: warnings, groups, scores
+    POST /api/users/{id}/actions/{action}   ban | unban | clear_warnings
+    PATCH /api/groups/{id}/settings         edit welcome text, rules, warn limit
     GET  /api/events           recent events (tag + text filter)
     GET  /api/settings         configuration summary (secrets redacted)
     POST /api/actions/{name}   broadcast | sweep | backup | purge_events | restart | shutdown
@@ -152,6 +158,51 @@ class WebAPI:
     async def modules(self, request: web.Request) -> web.Response:
         return _json({"ok": True, "modules": await self.state.modules_payload(), "demo": self.state.demo})
 
+    async def moderation(self, request: web.Request) -> web.Response:
+        days = int(request.query.get("days", 7) or 7)
+        limit = int(request.query.get("limit", 40) or 40)
+        return _json(await self.state.moderation(days=days, limit=limit))
+
+    async def users(self, request: web.Request) -> web.Response:
+        query = request.query.get("q", "")
+        limit = int(request.query.get("limit", 30) or 30)
+        banned_raw = request.query.get("banned")
+        banned = None if banned_raw in (None, "", "all") else banned_raw.lower() in ("1", "true", "yes")
+        return _json(await self.state.users(query=query, limit=limit, banned=banned))
+
+    async def user(self, request: web.Request) -> web.Response:
+        try:
+            user_id = int(request.match_info["user_id"])
+        except ValueError:
+            return _json({"ok": False, "error": "bad user id"}, 400)
+        result = await self.state.user_detail(user_id)
+        return _json(result, 200 if result.get("ok") else 404)
+
+    async def user_action(self, request: web.Request) -> web.Response:
+        try:
+            user_id = int(request.match_info["user_id"])
+        except ValueError:
+            return _json({"ok": False, "error": "bad user id"}, 400)
+        action = request.match_info["action"]
+        body = await self._body(request)
+        result = await self.state.user_action(user_id, action, body)
+        return _json(result, 200 if result.get("ok") else 400)
+
+    async def apply_module_all(self, request: web.Request) -> web.Response:
+        key = request.match_info["key"]
+        body = await self._body(request)
+        result = await self.state.apply_module_all(key, bool(body.get("enabled", True)))
+        return _json(result, 200 if result.get("ok") else 400)
+
+    async def edit_group_settings(self, request: web.Request) -> web.Response:
+        try:
+            chat_id = int(request.match_info["chat_id"])
+        except ValueError:
+            return _json({"ok": False, "error": "bad chat id"}, 400)
+        body = await self._body(request)
+        result = await self.state.update_group_settings(chat_id, body.get("settings") or body)
+        return _json(result, 200 if result.get("ok") else 400)
+
     async def events(self, request: web.Request) -> web.Response:
         limit = int(request.query.get("limit", 60) or 60)
         tag = request.query.get("tag", "")
@@ -288,11 +339,17 @@ class WebAPI:
         app.router.add_get("/api/groups", g(self.groups))
         app.router.add_get("/api/groups/{chat_id}", g(self.group))
         app.router.add_get("/api/modules", g(self.modules))
+        app.router.add_get("/api/moderation", g(self.moderation))
+        app.router.add_get("/api/users", g(self.users))
+        app.router.add_get("/api/users/{user_id}", g(self.user))
         app.router.add_get("/api/events", g(self.events))
         app.router.add_get("/api/settings", g(self.settings))
         app.router.add_get("/api/stream", self.stream)
 
         app.router.add_post("/api/groups/{chat_id}/modules/{key}", g(self.toggle_group_module))
+        app.router.add_patch("/api/groups/{chat_id}/settings", g(self.edit_group_settings))
+        app.router.add_post("/api/users/{user_id}/actions/{action}", g(self.user_action))
+        app.router.add_post("/api/modules/{key}/apply-all", g(self.apply_module_all))
         app.router.add_post("/api/modules/{key}", g(self.toggle_module))
         app.router.add_post("/api/actions/{name}", g(self.action))
         app.router.add_post("/api/auth/login", self.login)

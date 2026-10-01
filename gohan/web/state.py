@@ -22,7 +22,13 @@ from .modules import MODULES, categories, chat_modules, global_modules, module
 
 log = get_logger("web.state")
 
-__all__ = ["WebState", "build_state"]
+__all__ = ["EDITABLE_CHAT_KEYS", "WebState", "build_state"]
+
+#: Text/number chat settings an admin may edit from the browser panel.
+EDITABLE_CHAT_KEYS: dict[str, tuple[str, int]] = {
+    "welcome_text": ("welcome message", 600),
+    "rules": ("group rules", 1500),
+}
 
 #: How many points the activity chart shows (24 h in 2 h buckets = 12 points).
 ACTIVITY_BUCKETS = 12
@@ -35,6 +41,28 @@ _DEMO_GROUPS: tuple[tuple[int, str, int, str], ...] = (
     (-1001555098765, "Gaming Squad", 640, "supergroup"),
     (-1001988887777, "Music & Lofi", 312, "group"),
     (-1001444333222, "Bot Testing Ground", 12, "group"),
+)
+
+_DEMO_USERS: tuple[tuple[int, str, str, int, bool], ...] = (
+    (555000111, "spamking", "Spam King", 7, True),
+    (555000222, "cryptoqueen", "Crypto Queen", 4, False),
+    (555000333, "lurker99", "Quiet One", 3, False),
+    (555000444, "asha", "Asha Nair", 1, False),
+    (555000555, "rahul_dev", "Rahul", 1, False),
+    (555000666, "botfarm_07", "Promo Account", 6, True),
+    (555000777, "meera", "Meera", 0, False),
+    (555000888, "arjun_k", "Arjun", 0, False),
+)
+
+_DEMO_WARNING_REASONS: tuple[str, ...] = (
+    "scam link in a newcomer's first message",
+    "flood: 9 messages in 8 s",
+    "repeated identical messages",
+    "invite link - links are not allowed here",
+    "forwarded from a channel",
+    "three warnings reached - muted for 1 h",
+    "caps lock shouting",
+    "manual /warn by an admin",
 )
 
 _DEMO_EVENTS: tuple[tuple[str, str], ...] = (
@@ -338,6 +366,11 @@ class WebState:
                 if int(chat["chat_id"]) == int(chat_id):
                     settings = chat.get("settings") or {}
                     chat["module_states"] = {m.key: bool(settings.get(m.key, m.default)) for m in chat_modules()}
+                    chat["editable"] = {
+                        "welcome_text": settings.get("welcome_text") or "👋 welcome {name} to {chat}!",
+                        "rules": settings.get("rules") or "1. be kind\n2. no spam\n3. stay on topic",
+                        "warn_limit": 3,
+                    }
                     chat["top_filters"] = [
                         {"trigger": name, "uses": uses}
                         for name, uses in (("#rules", 42), ("#links", 31), ("#faq", 12))
@@ -353,6 +386,11 @@ class WebState:
         group = self._group_row(row)
         settings = group["settings"]
         group["module_states"] = {m.key: bool(settings.get(m.key, m.default)) for m in chat_modules()}
+        group["editable"] = {
+            "welcome_text": settings.get("welcome_text") or "",
+            "rules": settings.get("rules") or "",
+            "warn_limit": int(settings.get("warn_limit", 3) or 3),
+        }
         group["warnings"] = await self.db.fetch_value(
             "SELECT COUNT(*) FROM warnings WHERE chat_id = ?", (chat_id,)
         )
@@ -373,6 +411,51 @@ class WebState:
         ][:5]
         return {"ok": True, "group": group}
 
+    async def update_group_settings(self, chat_id: int, values: dict[str, Any]) -> dict[str, Any]:
+        """Edit the text/number settings of one group (the Independent View editor)."""
+        allowed = dict(EDITABLE_CHAT_KEYS)
+        allowed["warn_limit"] = ("warnings before a ban", 3)
+        changed: dict[str, Any] = {}
+        for key, value in (values or {}).items():
+            if key not in allowed:
+                continue
+            label, limit = allowed[key]
+            if isinstance(limit, int) and key == "warn_limit":
+                try:
+                    number = max(1, min(int(value), 20))
+                except (TypeError, ValueError):
+                    continue
+                changed[key] = number
+            else:
+                text = str(value)[: int(limit)]
+                changed[key] = text
+        if not changed:
+            return {"ok": False, "error": "nothing to update"}
+        if not self.live:
+            return {"ok": True, "demo": True, "updated": changed}
+
+        for key, value in changed.items():
+            await self.db.set_chat_setting(chat_id, key, value)
+        await self.db.log_event("WebSettings", chat_id=chat_id, data={"keys": list(changed)})
+        log.info("web: chat %s settings updated: %s", chat_id, list(changed))
+        return {"ok": True, "chat_id": chat_id, "updated": changed}
+
+    async def apply_module_all(self, key: str, enabled: bool) -> dict[str, Any]:
+        """Turn one chat module on or off in **every** group at once."""
+        item = module(key)
+        if item is None or item.scope != "chat":
+            return {"ok": False, "error": "unknown chat module"}
+        if not self.live:
+            return {"ok": True, "demo": True, "key": key, "enabled": enabled, "groups": 6}
+        chats = await self.db.chats_with_module_key(key)
+        for chat_id in chats:
+            await self.db.set_chat_setting(chat_id, key, bool(enabled))
+        await self.db.log_event(
+            "WebBulk", data={"module": key, "enabled": bool(enabled), "groups": len(chats)}
+        )
+        log.info("web: module %s -> %s across %d groups", key, enabled, len(chats))
+        return {"ok": True, "key": key, "enabled": bool(enabled), "groups": len(chats)}
+
     async def set_chat_module(self, chat_id: int, key: str, enabled: bool) -> dict[str, Any]:
         item = module(key)
         if item is None or item.scope != "chat":
@@ -387,6 +470,307 @@ class WebState:
         )
         log.info("web: chat %s module %s -> %s", chat_id, key, enabled)
         return {"ok": True, "chat_id": chat_id, "key": key, "enabled": bool(enabled)}
+
+    # -- users ---------------------------------------------------------------
+
+    async def users(self, *, query: str = "", limit: int = 30, banned: bool | None = None) -> dict[str, Any]:
+        """Search users for the moderation page."""
+        limit = max(1, min(int(limit), 200))
+        if self.live:
+            rows = await self.db.search_users(query, limit=limit, banned=banned)
+            counts = await self.db.fetch_all(
+                "SELECT user_id, COUNT(*) AS n FROM warnings GROUP BY user_id"
+            )
+            warning_counts = {int(row["user_id"]): int(row["n"]) for row in counts}
+            items = [
+                {
+                    "user_id": row["user_id"],
+                    "username": row["username"],
+                    "name": row["first_name"] or (f"@{row['username']}" if row["username"] else str(row["user_id"])),
+                    "banned": bool(row["is_banned"]),
+                    "premium": bool(row["is_premium"]),
+                    "first_seen": _now_iso(row["first_seen"]),
+                    "last_seen": _now_iso(row["last_seen"]),
+                    "warnings": warning_counts.get(int(row["user_id"]), 0),
+                    "starts": int(row["start_count"] or 0),
+                }
+                for row in rows
+            ]
+            return {"ok": True, "users": items, "count": len(items), "demo": False}
+
+        rng = random.Random(self.demo_seed + 3)
+        items = []
+        for user_id, username, name, warnings, is_banned in _DEMO_USERS:
+            if banned is not None and is_banned != banned:
+                continue
+            if query:
+                needle = query.lstrip("@").lower()
+                if needle not in username.lower() and needle not in name.lower() and needle not in str(user_id):
+                    continue
+            items.append(
+                {
+                    "user_id": user_id,
+                    "username": username,
+                    "name": name,
+                    "banned": is_banned,
+                    "premium": rng.random() > 0.7,
+                    "first_seen": _now_iso(self.started_at - rng.randint(5, 200) * 86400),
+                    "last_seen": _now_iso(time.time() - rng.randint(30, 40000)),
+                    "warnings": warnings,
+                    "starts": rng.randint(0, 12),
+                }
+            )
+        return {"ok": True, "users": items[:limit], "count": len(items), "demo": True}
+
+    async def user_detail(self, user_id: int) -> dict[str, Any]:
+        """One user: warnings, groups, scores - the drawer."""
+        if self.live:
+            record = await self.db.get_user(user_id)
+            if record is None:
+                return {"ok": False, "error": "unknown user"}
+            warnings = await self.db.warnings_by_user(user_id, limit=50)
+            groups = await self.db.user_groups(user_id)
+            scores = await self.db.scores_of(user_id)
+            return {
+                "ok": True,
+                "user": {
+                    "user_id": record.user_id,
+                    "username": record.username,
+                    "name": record.first_name or str(record.user_id),
+                    "banned": record.is_banned,
+                    "premium": record.is_premium,
+                    "language": record.language_code,
+                    "first_seen": _now_iso(record.first_seen),
+                    "last_seen": _now_iso(record.last_seen),
+                    "starts": record.start_count,
+                    "warnings": len(warnings),
+                },
+                "warnings": [
+                    {
+                        "id": row["id"],
+                        "chat_id": row["chat_id"],
+                        "chat_title": row["chat_title"] if "chat_title" in row.keys() else None,
+                        "reason": row["reason"] or "no reason given",
+                        "admin_id": row["admin_id"],
+                        "ts": _now_iso(row["created_at"]),
+                        "age": _age(time.time() - row["created_at"]),
+                    }
+                    for row in warnings
+                ],
+                "groups": [
+                    {"chat_id": row["chat_id"], "title": row["title"], "warnings": int(row["warnings"])}
+                    for row in groups
+                ],
+                "scores": [
+                    {"game": row["game"], "score": int(row["best"]), "chat_id": row["chat_id"]}
+                    for row in scores
+                ],
+            }
+
+        for user_id_, username, name, warnings, is_banned in _DEMO_USERS:
+            if user_id_ != int(user_id):
+                continue
+            rng = random.Random(user_id_)
+            rows = []
+            for index in range(warnings):
+                rows.append(
+                    {
+                        "id": index + 1,
+                        "chat_id": _DEMO_GROUPS[index % len(_DEMO_GROUPS)][0],
+                        "chat_title": _DEMO_GROUPS[index % len(_DEMO_GROUPS)][1],
+                        "reason": rng.choice(_DEMO_WARNING_REASONS),
+                        "admin_id": 42,
+                        "ts": _now_iso(time.time() - index * 86400 * 2),
+                        "age": _age(index * 86400 * 2 + 400),
+                    }
+                )
+            return {
+                "ok": True,
+                "user": {
+                    "user_id": user_id_,
+                    "username": username,
+                    "name": name,
+                    "banned": is_banned,
+                    "premium": rng.random() > 0.6,
+                    "language": "en",
+                    "first_seen": _now_iso(self.started_at - 90 * 86400),
+                    "last_seen": _now_iso(time.time() - rng.randint(60, 8000)),
+                    "starts": rng.randint(0, 9),
+                    "warnings": warnings,
+                },
+                "warnings": rows,
+                "groups": [
+                    {"chat_id": g[0], "title": g[1], "warnings": max(0, warnings - index)}
+                    for index, g in enumerate(_DEMO_GROUPS[:4])
+                ],
+                "scores": [
+                    {"game": "quiz", "score": rng.randint(8, 40), "chat_id": _DEMO_GROUPS[0][0]},
+                    {"game": "guess", "score": rng.randint(3, 15), "chat_id": _DEMO_GROUPS[0][0]},
+                ],
+            }
+        return {"ok": False, "error": "unknown user"}
+
+    async def user_action(self, user_id: int, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Ban, unban or clear the warnings of a user from the browser."""
+        payload = payload or {}
+        if not self.live:
+            return {"ok": True, "demo": True, "message": f"{action} is a demo no-op"}
+
+        record = await self.db.get_user(user_id)
+        if record is None and action != "unban":
+            return {"ok": False, "error": "unknown user"}
+
+        if action == "ban":
+            await self.db.set_banned(user_id, True)
+            message = "user blocked from the bot"
+        elif action == "unban":
+            await self.db.set_banned(user_id, False)
+            message = "user unblocked"
+        elif action in ("clear_warnings", "clear"):
+            removed = await self.db.clear_all_warnings(user_id)
+            message = f"cleared {removed} warnings"
+        else:
+            return {"ok": False, "error": f"unknown action {action!r}"}
+
+        await self.db.log_event(
+            "WebAction", user_id=user_id, data={"action": action, "by": "web panel"}
+        )
+        log.info("web: user %s -> %s", user_id, action)
+
+        # a real Telegram-side ban/unban too, when we have a bot and a chat
+        chat_id = payload.get("chat_id")
+        bot = self.service("bot")
+        if bot is not None and chat_id and action in ("ban", "unban"):
+            try:
+                from aiogram.exceptions import TelegramAPIError
+
+                if action == "ban":
+                    await bot.ban_chat_member(int(chat_id), user_id)
+                else:
+                    await bot.unban_chat_member(int(chat_id), user_id, only_if_banned=True)
+                message += f" (in {chat_id})"
+            except TelegramAPIError as exc:
+                message += f" (Telegram refused: {str(exc)[:80]})"
+            except Exception as exc:
+                log.debug("telegram ban failed: %s", exc)
+        return {"ok": True, "message": message, "action": action, "user_id": user_id}
+
+    # -- moderation ----------------------------------------------------------
+
+    async def moderation(self, *, days: int = 7, limit: int = 40) -> dict[str, Any]:
+        """The moderation page: counts, a chart and the newest cases."""
+        if self.live:
+            warnings = await self.db.recent_warnings(limit=limit, days=days)
+            per_day = await self.db.warnings_per_day(days=days)
+            offenders = await self.db.top_offenders(limit=8, days=days)
+            chats = await self.db.top_warning_chats(limit=6, days=days)
+            cases = [
+                {
+                    "id": row["id"],
+                    "user_id": row["user_id"],
+                    "user": row["first_name"] or (f"@{row['username']}" if row["username"] else str(row["user_id"])),
+                    "username": row["username"],
+                    "chat_id": row["chat_id"],
+                    "chat": row["chat_title"] or str(row["chat_id"]),
+                    "reason": row["reason"] or "no reason given",
+                    "ts": _now_iso(row["created_at"]),
+                    "age": _age(time.time() - row["created_at"]),
+                }
+                for row in warnings
+            ]
+            total = len(cases)
+            all_time = int(await self.db.fetch_value("SELECT COUNT(*) FROM warnings"))
+            banned = len(await self.db.banned_users())
+            return {
+                "ok": True,
+                "demo": False,
+                "window_days": days,
+                "kpis": [
+                    {"icon": "⚠️", "label": f"warnings ({days}d)", "value": total, "delta": f"{all_time} all time"},
+                    {"icon": "🚫", "label": "blocked users", "value": banned, "delta": "bot-wide"},
+                    {"icon": "🏆", "label": "top offender", "value": (offenders[0]["n"] if offenders else 0), "delta": (offenders[0]["username"] or str(offenders[0]["user_id"])) if offenders else "none"},
+                    {"icon": "💬", "label": "busiest group", "value": (chats[0]["n"] if chats else 0), "delta": (chats[0]["title"] or str(chats[0]["chat_id"])) if chats else "none"},
+                ],
+                "chart": self._day_buckets(per_day, days),
+                "cases": cases,
+                "offenders": [
+                    {
+                        "user_id": row["user_id"],
+                        "name": row["first_name"] or (f"@{row['username']}" if row["username"] else str(row["user_id"])),
+                        "username": row["username"],
+                        "warnings": int(row["n"]),
+                        "groups": int(row["chats"]),
+                    }
+                    for row in offenders
+                ],
+                "chats": [
+                    {"chat_id": row["chat_id"], "title": row["title"] or str(row["chat_id"]), "warnings": int(row["n"])}
+                    for row in chats
+                ],
+            }
+
+        # demo
+        rng = random.Random(self.demo_seed + 5)
+        cases = []
+        for index in range(min(limit, 26)):
+            user_id, username, name, warnings, _ = _DEMO_USERS[index % len(_DEMO_USERS)]
+            group = _DEMO_GROUPS[index % len(_DEMO_GROUPS)]
+            stamp = time.time() - index * rng.randint(30, 300)
+            cases.append(
+                {
+                    "id": index + 1,
+                    "user_id": user_id,
+                    "user": name,
+                    "username": username,
+                    "chat_id": group[0],
+                    "chat": group[1],
+                    "reason": rng.choice(_DEMO_WARNING_REASONS),
+                    "ts": _now_iso(stamp),
+                    "age": _age(time.time() - stamp),
+                }
+            )
+        base = time.time()
+        chart = [
+            {
+                "label": datetime.fromtimestamp(base - (days - 1 - i) * 86400).strftime("%a"),
+                "value": rng.randint(4, 26),
+            }
+            for i in range(days)
+        ]
+        offenders = sorted(_DEMO_USERS, key=lambda u: -u[3])[:8]
+        return {
+            "ok": True,
+            "demo": True,
+            "window_days": days,
+            "kpis": [
+                {"icon": "⚠️", "label": f"warnings ({days}d)", "value": sum(c["value"] for c in chart), "delta": "96 all time"},
+                {"icon": "🚫", "label": "blocked users", "value": sum(1 for u in _DEMO_USERS if u[4]), "delta": "bot-wide"},
+                {"icon": "🏆", "label": "top offender", "value": offenders[0][3], "delta": offenders[0][1]},
+                {"icon": "💬", "label": "busiest group", "value": 41, "delta": _DEMO_GROUPS[0][1]},
+            ],
+            "chart": chart,
+            "cases": cases,
+            "offenders": [
+                {"user_id": u[0], "name": u[2], "username": u[1], "warnings": u[3], "groups": max(1, u[3] // 3)}
+                for u in offenders
+            ],
+            "chats": [
+                {"chat_id": g[0], "title": g[1], "warnings": rng.randint(3, 40)} for g in _DEMO_GROUPS[:6]
+            ],
+        }
+
+    @staticmethod
+    def _day_buckets(per_day: list[tuple[float, int]], days: int) -> list[dict[str, Any]]:
+        """Fill the gaps so the chart always has one point per day."""
+        found = {int(stamp) : count for stamp, count in per_day}
+        today = int(time.time() // 86400 * 86400)
+        return [
+            {
+                "label": datetime.fromtimestamp(today - (days - 1 - i) * 86400).strftime("%a"),
+                "value": found.get(today - (days - 1 - i) * 86400, 0),
+            }
+            for i in range(days)
+        ]
 
     # -- events --------------------------------------------------------------
 
@@ -468,7 +852,7 @@ class WebState:
                 {"key": "active", "label": "active 24h", "value": counts["active_24h"], "delta": "seen today", "icon": "📡"},
                 {"key": "groups", "label": "groups", "value": counts["groups"], "delta": "watched", "icon": "💬"},
                 {"key": "filters", "label": "filters", "value": counts["filters"], "delta": f"{counts['notes']} notes", "icon": "🧲"},
-                {"key": "warnings", "label": "warnings", "value": counts["warnings"], "delta": f"{counts['banned']} banned", "icon": "⚠️"},
+                {"key": "warnings", "label": "warnings", "value": counts["warnings"], "delta": f"{counts['banned']} blocked", "icon": "⚠️"},
                 {"key": "games", "label": "games 24h", "value": counts["games"], "delta": "played", "icon": "🎮"},
             ],
             "activity": activity,

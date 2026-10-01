@@ -62,10 +62,23 @@ The same port that keeps the bot awake serves a full control panel
 | Page | What it gives you |
 |---|---|
 | **Overview** | KPI cards, a 24 h activity chart, runtime health, live event feed, quick actions |
+| **Moderation** | warnings per day (7/30 d), most-warned members, recent cases with a live search, busiest groups |
+| **Users** | search by id, `@username` or name; filter to blocked users; open a case file per person |
 | **Modules** | every switch (22 of them) grouped into protection / community / fun / system, plus per-group scope |
-| **Groups** | searchable table; click a group for its modules, top filters, most-warned members |
+| **Groups** | searchable table; click a group for its modules, an **editor** for its welcome message, rules and warn limit, plus top filters and most-warned members |
 | **Events** | the log channel in a browser: tag filters, search, pause, CSV export |
 | **Settings** | configuration summary, broadcast composer, maintenance, danger zone |
+
+**Case files.** Clicking a warned user - from Moderation, Users or a group drawer -
+opens their history: every warning with reason, chat and age, the groups they have
+been warned in, their best game scores, and the two buttons that matter
+(**Block user** / **Unblock**, **Clear warnings**). Blocking sets the bot-wide
+ban the middleware enforces, and if a chat id is supplied it also bans them on
+Telegram.
+
+**Bulk control.** Every per-group module card on the Modules page has a `⇄`
+button that applies that switch to **every** active group at once - the thing
+you actually want when a raid wave starts.
 
 * **Live**: a server-sent-events stream pushes new events into the page; the
   dashboard falls back to polling on its own if the stream drops.

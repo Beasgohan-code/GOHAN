@@ -373,3 +373,121 @@ def test_dashboard_assets_match_the_page() -> None:
     # the page must not load anything from the internet: it has to work offline
     assert "http://" not in html.replace("http://www.w3.org", "")
     assert "https://" not in html
+
+
+# ---------------------------------------------------------------------------
+#  moderation surface
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_moderation_page_data_in_demo() -> None:
+    state = build_state(Settings(), None, {}, demo=True)
+    client = await make_client(state)
+    await client.start_server()
+    try:
+        data = await (await client.get("/api/moderation?days=7")).json()
+        assert data["ok"] and data["window_days"] == 7
+        assert len(data["kpis"]) == 4
+        assert len(data["chart"]) == 7
+        assert data["cases"] and data["offenders"] and data["chats"]
+        case = data["cases"][0]
+        assert {"user_id", "user", "chat", "reason", "age"} <= set(case)
+
+        thirty = await (await client.get("/api/moderation?days=30")).json()
+        assert len(thirty["chart"]) == 30
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_user_lookup_and_case_file(tmp_path: Path) -> None:
+    db = Database(tmp_path / "users.sqlite3")
+    await db.connect()
+    try:
+        settings = Settings(bot_token="1:x")
+        state = build_state(settings, db, {"settings": settings})
+        await db.upsert_user(900, username="badactor", first_name="Bad Actor")
+        await db.upsert_chat(-100700, title="Target Group", type="supergroup")
+        await db.add_warning(-100700, 900, admin_id=1, reason="scam link")
+
+        client = await make_client(state)
+        await client.start_server()
+        try:
+            found = await (await client.get("/api/users?q=badactor")).json()
+            assert found["count"] == 1 and found["users"][0]["warnings"] == 1
+            assert (await (await client.get("/api/users?q=900")).json())["count"] == 1
+
+            detail = await (await client.get("/api/users/900")).json()
+            assert detail["user"]["name"] == "Bad Actor"
+            assert detail["warnings"][0]["reason"] == "scam link"
+            assert detail["warnings"][0]["chat_title"] == "Target Group"
+            assert detail["groups"][0]["title"] == "Target Group"
+
+            assert (await client.get("/api/users/123456")).status == 404
+            assert (await client.get("/api/users/nope")).status == 400
+
+            blocked = await (await client.post("/api/users/900/actions/ban", json={})).json()
+            assert blocked["ok"] and await db.is_banned(900) is True
+            blocked_users = await (await client.get("/api/users?banned=true")).json()
+            assert [u["user_id"] for u in blocked_users["users"]] == [900]
+
+            cleared = await (await client.post("/api/users/900/actions/clear_warnings", json={})).json()
+            assert cleared["ok"] and cleared["message"].startswith("cleared 1")
+
+            released = await (await client.post("/api/users/900/actions/unban", json={})).json()
+            assert released["ok"] and await db.is_banned(900) is False
+
+            assert (await client.post("/api/users/900/actions/explode", json={})).status == 400
+        finally:
+            await client.close()
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_group_settings_editor_and_bulk_apply(tmp_path: Path) -> None:
+    db = Database(tmp_path / "edit.sqlite3")
+    await db.connect()
+    try:
+        settings = Settings(bot_token="1:x")
+        state = build_state(settings, db, {"settings": settings})
+        await db.upsert_chat(-100800, title="Editor Group", type="supergroup")
+        await db.upsert_chat(-100801, title="Other Group", type="supergroup")
+
+        client = await make_client(state)
+        await client.start_server()
+        try:
+            response = await client.patch(
+                "/api/groups/-100800/settings",
+                json={"settings": {"welcome_text": "hello {name}", "rules": "be nice", "warn_limit": 5, "bogus": "ignored"}},
+            )
+            assert response.status == 200
+            payload = await response.json()
+            assert set(payload["updated"]) == {"welcome_text", "rules", "warn_limit"}
+
+            chat_settings = await db.get_chat_settings(-100800)
+            assert chat_settings["welcome_text"] == "hello {name}"
+            assert chat_settings["warn_limit"] == 5
+            assert "bogus" not in chat_settings
+
+            detail = await (await client.get("/api/groups/-100800")).json()
+            assert detail["group"]["editable"]["warn_limit"] == 5
+
+            # a hostile warn_limit is clamped, and an empty patch is refused
+            await client.patch("/api/groups/-100800/settings", json={"settings": {"warn_limit": 999}})
+            assert (await db.get_chat_settings(-100800))["warn_limit"] == 20
+            assert (await client.patch("/api/groups/-100800/settings", json={"settings": {}})).status == 400
+
+            # bulk apply reaches every active chat
+            bulk = await (await client.post("/api/modules/captcha/apply-all", json={"enabled": True})).json()
+            assert bulk["ok"] and bulk["groups"] == 2
+            for chat_id in (-100800, -100801):
+                assert (await db.get_chat_settings(chat_id))["captcha"] is True
+
+            # global modules cannot be bulk-applied
+            assert (await client.post("/api/modules/ai/apply-all", json={"enabled": True})).status == 400
+        finally:
+            await client.close()
+    finally:
+        await db.close()

@@ -506,6 +506,143 @@ class Database:
         )
         return [(row["user_id"], row["n"]) for row in rows]
 
+
+    # -- moderation queries (used by the web panel) --------------------------
+
+    async def search_users(self, query: str = "", *, limit: int = 25, banned: bool | None = None) -> list[aiosqlite.Row]:
+        """Find users by id, username or name - newest activity first."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        needle = (query or "").strip()
+        if needle:
+            if needle.isdigit():
+                clauses.append("(user_id = ? OR CAST(user_id AS TEXT) LIKE ?)")
+                params.extend([int(needle), f"{needle}%"])
+            else:
+                clauses.append(
+                    "(LOWER(username) LIKE ? OR LOWER(first_name) LIKE ?)"
+                )
+                like = f"%{needle.lstrip('@').lower()}%"
+                params.extend([like, like])
+        if banned is not None:
+            clauses.append("is_banned = ?")
+            params.append(int(banned))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(max(1, min(int(limit), 200)))
+        return await self.fetch_all(
+            f"SELECT * FROM users {where} ORDER BY last_seen DESC LIMIT ?", tuple(params)
+        )
+
+    async def warnings_by_user(self, user_id: int, *, limit: int = 100) -> list[aiosqlite.Row]:
+        """A user's warnings with the chat title joined in, newest first."""
+        return await self.fetch_all(
+            """
+            SELECT w.*, c.title AS chat_title, c.username AS chat_username
+            FROM warnings w LEFT JOIN chats c ON c.chat_id = w.chat_id
+            WHERE w.user_id = ?
+            ORDER BY w.created_at DESC LIMIT ?
+            """,
+            (user_id, max(1, min(int(limit), 500))),
+        )
+
+    async def recent_warnings(
+        self,
+        *,
+        limit: int = 50,
+        chat_id: int | None = None,
+        query: str = "",
+        days: int | None = None,
+    ) -> list[aiosqlite.Row]:
+        """Warnings across every chat, newest first, with names joined in."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if chat_id is not None:
+            clauses.append("w.chat_id = ?")
+            params.append(chat_id)
+        if days:
+            clauses.append("w.created_at > ?")
+            params.append(now() - days * 86400)
+        if query:
+            like = f"%{query.lower()}%"
+            clauses.append("(LOWER(w.reason) LIKE ? OR LOWER(u.username) LIKE ? OR LOWER(u.first_name) LIKE ? OR CAST(w.user_id AS TEXT) LIKE ?)")
+            params.extend([like, like, like, f"%{query}%"])
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(max(1, min(int(limit), 500)))
+        return await self.fetch_all(
+            f"""
+            SELECT w.*, u.username, u.first_name, c.title AS chat_title
+            FROM warnings w
+            LEFT JOIN users u ON u.user_id = w.user_id
+            LEFT JOIN chats c ON c.chat_id = w.chat_id
+            {where}
+            ORDER BY w.created_at DESC LIMIT ?
+            """,
+            tuple(params),
+        )
+
+    async def warnings_per_day(self, days: int = 7) -> list[tuple[float, int]]:
+        """``(day_start_timestamp, count)`` for the moderation chart."""
+        since = now() - days * 86400
+        rows = await self.fetch_all(
+            "SELECT CAST(created_at / 86400 AS INTEGER) AS day, COUNT(*) AS n "
+            "FROM warnings WHERE created_at > ? GROUP BY day ORDER BY day",
+            (since,),
+        )
+        return [(float(row["day"]) * 86400, int(row["n"])) for row in rows]
+
+    async def top_offenders(self, *, limit: int = 10, days: int = 30) -> list[aiosqlite.Row]:
+        return await self.fetch_all(
+            """
+            SELECT w.user_id, COUNT(*) AS n, u.username, u.first_name,
+                   COUNT(DISTINCT w.chat_id) AS chats
+            FROM warnings w LEFT JOIN users u ON u.user_id = w.user_id
+            WHERE w.created_at > ?
+            GROUP BY w.user_id ORDER BY n DESC LIMIT ?
+            """,
+            (now() - days * 86400, max(1, min(int(limit), 100))),
+        )
+
+    async def top_warning_chats(self, *, limit: int = 8, days: int = 30) -> list[aiosqlite.Row]:
+        return await self.fetch_all(
+            """
+            SELECT w.chat_id, COUNT(*) AS n, c.title
+            FROM warnings w LEFT JOIN chats c ON c.chat_id = w.chat_id
+            WHERE w.created_at > ?
+            GROUP BY w.chat_id ORDER BY n DESC LIMIT ?
+            """,
+            (now() - days * 86400, max(1, min(int(limit), 50))),
+        )
+
+    async def clear_all_warnings(self, user_id: int) -> int:
+        count = int(await self.fetch_value("SELECT COUNT(*) FROM warnings WHERE user_id = ?", (user_id,)))
+        await self.execute("DELETE FROM warnings WHERE user_id = ?", (user_id,))
+        return count
+
+    async def user_groups(self, user_id: int, *, limit: int = 20) -> list[aiosqlite.Row]:
+        """Chats where this user has been warned, or that they administrate."""
+        return await self.fetch_all(
+            """
+            SELECT DISTINCT c.chat_id, c.title,
+                   (SELECT COUNT(*) FROM warnings w WHERE w.chat_id = c.chat_id AND w.user_id = ?) AS warnings
+            FROM chats c
+            WHERE warnings > 0
+            ORDER BY warnings DESC LIMIT ?
+            """,
+            (user_id, max(1, min(int(limit), 100))),
+        )
+
+    async def scores_of(self, user_id: int, *, limit: int = 12) -> list[aiosqlite.Row]:
+        return await self.fetch_all(
+            "SELECT game, chat_id, MAX(score) AS best FROM scores WHERE user_id = ? "
+            "GROUP BY game, chat_id ORDER BY best DESC LIMIT ?",
+            (user_id, max(1, min(int(limit), 50))),
+        )
+
+    async def chats_with_module_key(self, key: str) -> list[int]:
+        """Every active chat, for bulk module changes."""
+        rows = await self.fetch_all("SELECT chat_id FROM chats WHERE is_active = 1")
+        return [int(row["chat_id"]) for row in rows]
+
     # -- notes ---------------------------------------------------------------
 
     async def save_note(

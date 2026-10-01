@@ -74,7 +74,10 @@ async function api(path, options = {}) {
 const App = {
   page: 'overview',
   data: { overview: null, groups: null, events: null, settings: null, group: null },
-  ui: { search: '', tag: '', paused: false, selected: 0, groupQuery: '' },
+  ui: {
+    search: '', tag: '', paused: false, selected: 0, groupQuery: '',
+    caseQuery: '', userQuery: '', userFilter: 'all', modDays: 7,
+  },
   sse: null,
   poll: null,
   retry: 0,
@@ -235,6 +238,10 @@ const moduleCard = (mod) => `
       </div>
     </div>
     ${switchHtml(mod.key, mod.enabled, { scope: mod.scope })}
+    ${mod.scope === 'chat' ? `
+      <button class="icon-btn" style="width:30px;height:30px;font-size:13px"
+        title="apply to every group"
+        data-action="apply-all" data-key="${esc(mod.key)}" data-on="${mod.enabled ? '1' : '0'}">⇄</button>` : ''}
   </article>`;
 
 const eventRow = (event) => `
@@ -494,6 +501,8 @@ const skeleton = () => `
 /* ------------------------------------------------------------ rendering --- */
 const PAGES = {
   overview: { title: 'Overview', sub: 'everything the bot is doing, live', render: pageOverview, search: false },
+  moderation: { title: 'Moderation', sub: 'cases, offenders and the busiest groups', render: pageModeration, search: false },
+  users: { title: 'Users', sub: 'look anyone up and act', render: pageUsers, search: true },
   modules: { title: 'Modules', sub: 'every switch in one place', render: pageModules, search: true },
   groups: { title: 'Groups', sub: 'per-group control', render: pageGroups, search: true },
   events: { title: 'Events', sub: 'the log channel, in a browser', render: pageEvents, search: true },
@@ -512,6 +521,10 @@ function render() {
     const canvas = $('#chart');
     if (canvas) drawChart(canvas, App.data.overview.activity);
   }
+  if (App.page === 'moderation' && App.data.moderation) {
+    const canvas = $('#mod-chart');
+    if (canvas) drawChart(canvas, App.data.moderation.chart);
+  }
   updateBadges();
 }
 
@@ -520,6 +533,8 @@ function updateBadges() {
   if (!d) return;
   $('#badge-modules').textContent = `${d.modules.filter((m) => m.enabled).length}`;
   $('#badge-groups').textContent = `${d.counts?.groups ?? ''}`;
+  const warningsBadge = $('#badge-warnings');
+  if (warningsBadge) warningsBadge.textContent = num(d.counts?.warnings ?? 0);
   $('#badge-events').textContent = '';
   $('#brand-mode').textContent = d.demo ? 'demo mode' : 'live control panel';
   $('#demo-chip').hidden = !d.demo;
@@ -545,6 +560,13 @@ async function loadEvents({ quiet = false } = {}) {
 async function loadSettings() {
   App.data.settings = await api('/api/settings');
 }
+async function loadModeration(days = App.ui.modDays) {
+  App.data.moderation = await api(`/api/moderation?days=${encodeURIComponent(days)}&limit=60`);
+}
+async function loadUsers(query = App.ui.userQuery, filter = App.ui.userFilter) {
+  const banned = filter === 'banned' ? 'banned=true' : '';
+  App.data.users = await api(`/api/users?q=${encodeURIComponent(query)}&${banned}&limit=60`);
+}
 
 async function refresh({ silent = false } = {}) {
   try {
@@ -552,6 +574,8 @@ async function refresh({ silent = false } = {}) {
     if (App.page === 'groups') await loadGroups();
     if (App.page === 'events' && !App.ui.paused) await loadEvents({ quiet: true });
     if (App.page === 'settings') await loadSettings();
+    if (App.page === 'moderation') await loadModeration();
+    if (App.page === 'users') await loadUsers();
     if (!silent) render();
     else if (App.page === 'overview') render();
   } catch (error) {
@@ -628,13 +652,64 @@ async function toggleModule(input) {
   }
 }
 
+async function openUser(userId) {
+  openDrawer('loading…', `<div class="skeleton" style="height:200px"></div>`);
+  try {
+    const data = await api(`/api/users/${encodeURIComponent(userId)}`);
+    const u = data.user;
+    openDrawer(u.name, `
+      <div class="kv">
+        ${kvRow('🆔 user id', `<span class="mono">${esc(u.user_id)}</span>`)}
+        ${kvRow('🔗 username', u.username ? `@${esc(u.username)}` : '—')}
+        ${kvRow('⚠️ warnings', num(u.warnings))}
+        ${kvRow('⭐ premium', u.premium ? 'yes' : 'no')}
+        ${kvRow('📅 first seen', esc(String(u.first_seen).slice(0, 10)))}
+        ${kvRow('👀 last seen', esc(String(u.last_seen).slice(0, 10)))}
+        ${kvRow('🚫 status', u.banned ? '<span class="pill bad">blocked</span>' : '<span class="pill ok">allowed</span>')}
+      </div>
+
+      <div class="btn-row">
+        <button class="btn ${u.banned ? 'btn-success' : 'btn-danger'}"
+          data-action="user-action" data-user="${esc(u.user_id)}" data-op="${u.banned ? 'unban' : 'ban'}">
+          ${u.banned ? '✅ Unblock user' : '🚫 Block user'}
+        </button>
+        <button class="btn" data-action="user-action" data-user="${esc(u.user_id)}" data-op="clear_warnings">
+          🧹 Clear warnings
+        </button>
+      </div>
+
+      ${data.warnings?.length ? `
+        <h3 style="font-size:13px;color:var(--mut);text-transform:uppercase;letter-spacing:.8px">warnings</h3>
+        <div class="feed">
+          ${data.warnings.map((w) => `
+            <div class="event">
+              <div class="event-ico">⚠️</div>
+              <div class="event-main"><strong>${esc(w.reason)}</strong><p>${esc(w.chat_title || w.chat_id)} · by <span class="mono">${esc(w.admin_id ?? '—')}</span></p></div>
+              <div class="event-time">${esc(w.age)}</div>
+            </div>`).join('')}
+        </div>` : ''}
+
+      ${data.groups?.length ? `
+        <h3 style="font-size:13px;color:var(--mut);text-transform:uppercase;letter-spacing:.8px">groups</h3>
+        <div class="kv">${data.groups.map((g) => kvRow(`💬 ${esc(g.title)}`, `${num(g.warnings)} warnings`)).join('')}</div>` : ''}
+
+      ${data.scores?.length ? `
+        <h3 style="font-size:13px;color:var(--mut);text-transform:uppercase;letter-spacing:.8px">best scores</h3>
+        <div class="kv">${data.scores.map((sc) => kvRow(`🎮 ${esc(sc.game)}`, num(sc.score))).join('')}</div>` : ''}
+    `);
+  } catch (error) {
+    closeDrawer();
+    toast('err', 'could not open that user', error.message);
+  }
+}
+
 async function openGroup(chatId) {
   openDrawer('loading…', `<div class="skeleton" style="height:200px"></div>`);
   try {
     const data = await api(`/api/groups/${encodeURIComponent(chatId)}`);
     const g = data.group;
     const modules = App.data.overview?.modules.filter((m) => m.scope === 'chat') || [];
-    openDrawer(g.title, `
+    const drawerHtml = `
       <div class="kv">
         ${kvRow('🆔 chat id', `<span class="mono">${esc(g.chat_id)}</span>`)}
         ${kvRow('📦 type', esc(g.type))}
@@ -658,13 +733,77 @@ async function openGroup(chatId) {
         <h3 style="font-size:13px;color:var(--mut);text-transform:uppercase;letter-spacing:.8px">top filters</h3>
         <div class="kv">${g.top_filters.map((f) => kvRow(esc(f.trigger), `${num(f.uses)} uses`)).join('')}</div>` : ''}
 
+      <h3 style="font-size:13px;color:var(--mut);text-transform:uppercase;letter-spacing:.8px">edit this group</h3>
+      <label class="field">
+        <span>welcome message</span>
+        <textarea id="g-welcome" rows="3" placeholder="👋 welcome {name} to {chat}!"></textarea>
+      </label>
+      <label class="field">
+        <span>rules (/rules)</span>
+        <textarea id="g-rules" rows="4" placeholder="1. be kind&#10;2. no spam"></textarea>
+      </label>
+      <label class="field" style="max-width:180px">
+        <span>warnings before a ban</span>
+        <input id="g-warnlimit" type="number" min="1" max="20" value="${esc(g.editable?.warn_limit ?? 3)}">
+      </label>
+      <div class="btn-row">
+        <button class="btn btn-primary" data-action="save-group" data-chat="${esc(g.chat_id)}">💾 Save group settings</button>
+      </div>
+
       ${g.top_warned?.length ? `
         <h3 style="font-size:13px;color:var(--mut);text-transform:uppercase;letter-spacing:.8px">most warned</h3>
         <div class="kv">${g.top_warned.map((w) => kvRow(`<span class="mono">${esc(w.user_id)}</span>`, `${num(w.warnings)} warnings`)).join('')}</div>` : ''}
-    `);
+    `;
+    openDrawer(g.title, drawerHtml);
+    const welcome = $('#g-welcome');
+    const rules = $('#g-rules');
+    if (welcome) welcome.value = g.editable?.welcome_text || '';
+    if (rules) rules.value = g.editable?.rules || '';
   } catch (error) {
     closeDrawer();
     toast('err', 'could not open that group', error.message);
+  }
+}
+
+async function saveGroupSettings(chatId) {
+  const settings = {
+    welcome_text: $('#g-welcome')?.value ?? '',
+    rules: $('#g-rules')?.value ?? '',
+    warn_limit: Number($('#g-warnlimit')?.value || 3),
+  };
+  try {
+    const result = await api(`/api/groups/${encodeURIComponent(chatId)}/settings`, {
+      method: 'PATCH', body: { settings },
+    });
+    toast('ok', 'group settings saved', Object.keys(result.updated || {}).join(', '));
+  } catch (error) {
+    toast('err', 'could not save', error.message);
+  }
+}
+
+async function userAction(userId, op) {
+  try {
+    const result = await api(`/api/users/${encodeURIComponent(userId)}/actions/${encodeURIComponent(op)}`, {
+      method: 'POST', body: {},
+    });
+    toast('ok', result.message || op, result.demo ? 'demo no-op' : '');
+    closeDrawer();
+    if (App.page === 'users') await loadUsers();
+    if (App.page === 'moderation') await loadModeration();
+    render();
+  } catch (error) {
+    toast('err', `${op} failed`, error.message);
+  }
+}
+
+async function applyModuleAll(key, enabled) {
+  try {
+    const result = await api(`/api/modules/${encodeURIComponent(key)}/apply-all`, {
+      method: 'POST', body: { enabled },
+    });
+    toast('ok', `${key} → ${enabled ? 'on' : 'off'}`, `applied to ${result.groups} group(s)`);
+  } catch (error) {
+    toast('err', 'bulk change failed', error.message);
   }
 }
 
@@ -718,6 +857,8 @@ function paletteItems() {
     { icon: '📊', label: 'Overview', hint: 'page', run: () => go('overview') },
     { icon: '🧩', label: 'Modules', hint: 'page', run: () => go('modules') },
     { icon: '💬', label: 'Groups', hint: 'page', run: () => go('groups') },
+    { icon: '🛡', label: 'Moderation', hint: 'page', run: () => go('moderation') },
+    { icon: '👥', label: 'Users', hint: 'page', run: () => go('users') },
     { icon: '📨', label: 'Events', hint: 'page', run: () => go('events') },
     { icon: '⚙️', label: 'Settings', hint: 'page', run: () => go('settings') },
     { icon: '📣', label: 'Broadcast a message', hint: 'action', run: askBroadcast },
@@ -828,11 +969,20 @@ function wire() {
     const groupRow = event.target.closest('[data-action="open-group"]');
     if (groupRow) { openGroup(groupRow.dataset.chat); return; }
 
+    const userRow = event.target.closest('[data-action="open-user"]');
+    if (userRow) { openUser(userRow.dataset.user); return; }
+
     const action = event.target.closest('[data-action]');
     if (action) {
       const name = action.dataset.action;
       if (name === 'broadcast') askBroadcast();
       else if (name === 'run') await runAction(action.dataset.name);
+      else if (name === 'open-user') openUser(action.dataset.user);
+      else if (name === 'user-action') await userAction(action.dataset.user, action.dataset.op);
+      else if (name === 'save-group') await saveGroupSettings(action.dataset.chat);
+      else if (name === 'apply-all') await applyModuleAll(action.dataset.key, action.dataset.on !== '1');
+      else if (name === 'user-filter') { App.ui.userFilter = action.dataset.filter; await loadUsers(); render(); }
+      else if (name === 'window') { App.ui.modDays = Number(action.dataset.days); await loadModeration(); render(); }
       else if (name === 'lifecycle') askLifecycle(action.dataset.name);
       else if (name === 'toggle-maintenance') await toggleMaintenance();
       else if (name === 'logout') {
@@ -867,7 +1017,19 @@ function wire() {
     App.ui.search = event.target.value;
     if (App.page === 'groups') { await loadGroups(App.ui.search); render(); }
     else if (App.page === 'events') { await loadEvents(); }
+    else if (App.page === 'users') { App.ui.userQuery = App.ui.search; await loadUsers(); render(); }
   }, 260));
+
+  document.addEventListener('input', debounce((event) => {
+    if (event.target.id === 'case-search') {
+      App.ui.caseQuery = event.target.value;
+      const table = event.target.closest('.card')?.querySelector('tbody');
+      if (table && App.data.moderation) {
+        table.innerHTML = App.data.moderation.cases.filter(matchCase).map(caseRow).join('')
+          || `<tr><td colspan="5">${empty('🌙', 'no cases match')}</td></tr>`;
+      }
+    }
+  }, 200));
 
   document.addEventListener('click', (event) => {
     if (event.target.closest('#pause-btn')) {
