@@ -50,6 +50,45 @@ Run it:
 * **No yt-dlp?** `/music` returns search links instead of audio files.
 * **No ffmpeg?** MP3 conversion is skipped; files are sent as-is.
 
+## Web control panel
+
+The same port that keeps the bot awake serves a full control panel
+(``WEB_DASHBOARD=true``, default)::
+
+    http://<your-host>:8080/          the panel
+    http://<your-host>:8080/status    the classic status page
+    http://<your-host>:8080/health    JSON for uptime monitors
+
+| Page | What it gives you |
+|---|---|
+| **Overview** | KPI cards, a 24 h activity chart, runtime health, live event feed, quick actions |
+| **Modules** | every switch (22 of them) grouped into protection / community / fun / system, plus per-group scope |
+| **Groups** | searchable table; click a group for its modules, top filters, most-warned members |
+| **Events** | the log channel in a browser: tag filters, search, pause, CSV export |
+| **Settings** | configuration summary, broadcast composer, maintenance, danger zone |
+
+* **Live**: a server-sent-events stream pushes new events into the page; the
+  dashboard falls back to polling on its own if the stream drops.
+* **Control**: toggles write straight into the chat settings the bot reads, so a
+  switch flipped in the browser is live in Telegram immediately.
+* **Command palette**: `Ctrl/Cmd + K` jumps anywhere and runs owner actions.
+* **Works offline**: no CDN, no build step, no external fonts - one CSS file and
+  one JS file served by the bot itself.
+* **Themes**: dark by default, light one click away, remembered per browser.
+
+### Securing it
+
+`WEB_AUTH` has three modes:
+
+```ini
+WEB_AUTH=off       # private network or local use
+WEB_AUTH=token     # a shared secret; the bot writes one to data/.web_token
+WEB_AUTH=telegram  # Mini App initData, verified with BOT_TOKEN, owners only
+```
+
+Token sessions are HMAC-signed cookies that expire after 12 h, and failed logins
+are rate limited per IP (8 tries per 10 minutes).
+
 ## What the owner gets
 
 * a **DM on every start** with a live status card and quick buttons,

@@ -320,8 +320,28 @@ def build_dispatcher(
     return dp, order
 
 
+def _make_lifecycle(bot: Bot, db: Database, settings: Settings, log_channel: Any) -> Any:
+    """Let the web panel restart or stop the bot process.
+
+    The web layer must never touch the process itself - it just calls this hook,
+    which reuses the exact same code path as the Telegram ``/restart`` command.
+    """
+
+    async def lifecycle(action: str) -> None:
+        from .handlers.owner import _restart, _shutdown
+
+        log.warning("lifecycle action from the web panel: %s", action)
+        if action == "restart":
+            await _restart(bot, db, settings, log_channel)
+        elif action in ("shutdown", "stop"):
+            await _shutdown(bot, db, settings, log_channel, reason="web control panel")
+
+    return lifecycle
+
+
 async def build_runtime(settings: Settings) -> GohanBot:
     """Everything :mod:`gohan.__main__` needs, in order."""
+    runtime_started = time.time()
     settings.ensure_dirs()
     bot = build_bot(settings)
     db = Database(settings.database_path)
@@ -339,7 +359,19 @@ async def build_runtime(settings: Settings) -> GohanBot:
 
     keep_alive = None
     if settings.keep_alive:
-        keep_alive = KeepAlive(settings, stats=_make_stats(db, services, settings))
+        from .web.auth import Authenticator
+        from .web.state import build_state
+
+        services["auth"] = Authenticator(settings)
+        services["auth_mode"] = services["auth"].mode
+        services["lifecycle"] = _make_lifecycle(bot, db, settings, services.get("log_channel"))
+        web_state = build_state(settings, db, services, started_at=runtime_started)
+        keep_alive = KeepAlive(
+            settings,
+            stats=_make_stats(db, services, settings),
+            state=web_state,
+        )
+        keep_alive.auth = services["auth"]
 
     runtime = GohanBot(
         settings=settings,
@@ -357,6 +389,7 @@ async def build_runtime(settings: Settings) -> GohanBot:
         keep_alive=keep_alive,
         mtproto=services["mtproto"],
         routers=order,
+        started_at=runtime_started,
     )
     runtime.routers = order
 

@@ -28,6 +28,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 MtprotoMode = Literal["auto", "user", "bot", "off"]
 LlmProvider = Literal["off", "openai", "openai_compatible"]
 RichMode = Literal["auto", "html", "blocks"]
+WebAuthMode = Literal["off", "token", "telegram"]
 
 #: PaaS environment variable -> how to build a public URL out of it.
 _PLATFORM_URL_VARS: tuple[tuple[str, str, str], ...] = (
@@ -114,6 +115,16 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr | None = None
     llm_base_url: str = "https://api.openai.com/v1"
     llm_model: str = "gpt-4o-mini"
+
+    # --- Web control panel (dashboard served by the keep-alive port) ---------
+    web_dashboard: bool = True
+    # off      = anyone who can reach the port gets in (private networks, demo)
+    # token    = shared secret in WEB_TOKEN (or data/.web_token)
+    # telegram = Telegram Mini App initData, verified with the bot token
+    web_auth: WebAuthMode = "off"
+    web_token: SecretStr | None = None
+    # extra user ids allowed in when WEB_AUTH=telegram (defaults to OWNER_USER_IDS)
+    web_allowed_ids: str = ""
 
     # --- Runtime --------------------------------------------------------------
     # Skip updates that piled up while the bot was offline (a restart should not

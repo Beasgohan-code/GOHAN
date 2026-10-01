@@ -10,7 +10,10 @@ not need to be set at all.
 
 Routes
 ------
-``GET /``        the status page (dark, no build step, no external assets)
+``GET /``        the control panel (falling back to the status page)
+``GET /status``  the classic status page
+``GET /static/…``dashboard css/js
+``/api/…``       the control panel's JSON API (see :mod:`gohan.web.api`)
 ``GET /health``  JSON status - useful for uptime monitors and the Docker
                  ``HEALTHCHECK``
 ``GET /ping``    plain "ok" (the self-ping target; cheapest possible response)
@@ -42,15 +45,19 @@ StatsProvider = Callable[[], "dict[str, Any] | Awaitable[dict[str, Any]]"]
 class KeepAlive:
     """Owns the aiohttp app, the runner and the self-ping loop."""
 
-    def __init__(self, settings: Settings, *, stats: StatsProvider | None = None) -> None:
+    def __init__(
+        self, settings: Settings, *, stats: StatsProvider | None = None, state: Any = None
+    ) -> None:
         self.settings = settings
         self.stats = stats
+        self.state = state  # gohan.web.WebState, when the dashboard is enabled
         self.started = time.time()
         self._runner: web.AppRunner | None = None
         self._task: asyncio.Task[None] | None = None
         self._pings = 0
         self._ping_failures = 0
         self._last_error: str | None = None
+        self.api: Any = None
 
     # -- data ----------------------------------------------------------------
 
@@ -84,6 +91,13 @@ class KeepAlive:
     # -- routes --------------------------------------------------------------
 
     async def _root(self, request: web.Request) -> web.Response:
+        """The dashboard when it is configured, otherwise the status page."""
+        if self.api is not None:
+            return await self.api.page(request)
+        data = await self.health()
+        return web.Response(text=render_page(data), content_type="text/html")
+
+    async def _status(self, request: web.Request) -> web.Response:
         data = await self.health()
         return web.Response(text=render_page(data), content_type="text/html")
 
@@ -94,8 +108,20 @@ class KeepAlive:
         return web.Response(text="ok", headers={"Cache-Control": "no-store"})
 
     def make_app(self) -> web.Application:
-        app = web.Application()
-        app.router.add_get("/", self._root)
+        app = web.Application(client_max_size=64 * 1024)
+        if self.state is not None and getattr(self.settings, "web_dashboard", True):
+            from ..web.api import register_routes
+
+            self.api = register_routes(
+                app,
+                self.state,
+                auth=getattr(self, "auth", None),
+                dashboard=True,
+            )
+            app.router.add_get("/status", self._status)
+        else:
+            self.api = None
+            app.router.add_get("/", self._root)
         app.router.add_get("/health", self._health)
         app.router.add_get("/ping", self._ping)
         return app
@@ -112,7 +138,10 @@ class KeepAlive:
         site = web.TCPSite(runner, "0.0.0.0", self.settings.port)
         await site.start()
         self._runner = runner
-        log.info("status page on http://0.0.0.0:%s/", self.settings.port)
+        if self.api is not None:
+            log.info("control panel on http://0.0.0.0:%s/", self.settings.port)
+        else:
+            log.info("status page on http://0.0.0.0:%s/", self.settings.port)
 
     async def stop(self) -> None:
         if self._task is not None:

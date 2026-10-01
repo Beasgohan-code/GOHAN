@@ -14,6 +14,8 @@ import time
 
 from ..config import Settings
 from ..logging_setup import setup_logging
+from ..web.auth import Authenticator
+from ..web.state import build_state
 from .keep_alive import KeepAlive
 
 _STARTED = time.time()
@@ -41,12 +43,17 @@ def demo_stats() -> dict[str, object]:
     }
 
 
-async def main(port: int = 8080) -> None:
+async def main(port: int = 8080, *, demo: bool = True) -> None:
     setup_logging("INFO")
-    settings = Settings(bot_name="GOHAN", port=port, keep_alive_url="")
-    server = KeepAlive(settings, stats=demo_stats)
+    settings = Settings(bot_name="GOHAN", port=port, keep_alive_url="", web_auth="off")
+    state = build_state(settings, None, {}, demo=demo)
+    auth = Authenticator(settings)
+    server = KeepAlive(settings, stats=demo_stats, state=state)
+    server.auth = auth
     await server.start()
-    print(f"\n  GOHAN status page -> http://0.0.0.0:{port}/   (Ctrl+C to stop)\n")
+    print(f"\n  GOHAN control panel -> http://0.0.0.0:{port}/   (Ctrl+C to stop)")
+    print(f"  status page         -> http://0.0.0.0:{port}/status")
+    print(f"  api                 -> http://0.0.0.0:{port}/api/overview\n")
     try:
         while True:
             await asyncio.sleep(3600)
@@ -57,4 +64,5 @@ async def main(port: int = 8080) -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main(int(sys.argv[1]) if len(sys.argv) > 1 else 8080))
+    port = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 8080
+    asyncio.run(main(port))

@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="robots" content="noindex">
+<title>{{BOT_NAME}} · control panel</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧚</text></svg>">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-mode="{{MODE}}" data-version="{{VERSION}}">
+
+<div id="boot" class="boot">
+  <div class="boot-mark">🧚</div>
+  <div class="boot-bar"><i></i></div>
+  <p>waking up the control panel…</p>
+</div>
+
+<div id="auth" class="auth" hidden>
+  <form class="auth-card" id="auth-form">
+    <div class="auth-mark">🧚</div>
+    <h1>GOHAN</h1>
+    <p class="auth-sub">this panel is protected. paste your access token to continue.</p>
+    <label class="field">
+      <span>access token</span>
+      <input id="auth-token" type="password" autocomplete="current-password" placeholder="from data/.web_token" required>
+    </label>
+    <button class="btn btn-primary" type="submit">Unlock panel</button>
+    <p class="auth-hint" id="auth-error" hidden></p>
+    <p class="auth-foot">the token lives in <code>data/.web_token</code> on the server</p>
+  </form>
+</div>
+
+<div id="app" class="app" hidden>
+  <aside class="side" id="side">
+    <div class="brand">
+      <div class="brand-mark">🧚</div>
+      <div class="brand-text">
+        <strong>GOHAN</strong>
+        <span id="brand-mode">control panel</span>
+      </div>
+      <button class="icon-btn only-mobile" id="side-close" aria-label="close menu">✕</button>
+    </div>
+
+    <nav class="nav" id="nav">
+      <a class="nav-item" href="#/overview" data-page="overview"><span class="nav-ico">📊</span>Overview<span class="nav-badge" id="badge-events"></span></a>
+      <a class="nav-item" href="#/modules" data-page="modules"><span class="nav-ico">🧩</span>Modules<span class="nav-badge" id="badge-modules"></span></a>
+      <a class="nav-item" href="#/groups" data-page="groups"><span class="nav-ico">💬</span>Groups<span class="nav-badge" id="badge-groups"></span></a>
+      <a class="nav-item" href="#/events" data-page="events"><span class="nav-ico">📨</span>Events</a>
+      <a class="nav-item" href="#/settings" data-page="settings"><span class="nav-ico">⚙️</span>Settings</a>
+    </nav>
+
+    <div class="side-foot">
+      <div class="side-status">
+        <span class="dot" id="status-dot"></span>
+        <div>
+          <strong id="status-text">connecting…</strong>
+          <span id="status-sub">v{{VERSION}}</span>
+        </div>
+      </div>
+      <div class="side-links">
+        <a href="/status" target="_blank" rel="noopener">status page</a>
+        <a href="/health" target="_blank" rel="noopener">health</a>
+        <button class="linklike" id="theme-btn" type="button">theme</button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="top">
+      <button class="icon-btn only-mobile" id="side-open" aria-label="open menu">☰</button>
+      <div class="top-title">
+        <h1 id="page-title">Overview</h1>
+        <p id="page-sub">everything the bot is doing, live</p>
+      </div>
+      <div class="top-tools">
+        <label class="search" id="search-wrap" hidden>
+          <span>🔍</span>
+          <input id="search" type="search" placeholder="search…" autocomplete="off">
+        </label>
+        <button class="chip chip-demo" id="demo-chip" hidden>demo data</button>
+        <button class="icon-btn" id="palette-btn" title="command palette (Ctrl/Cmd + K)">⌘</button>
+        <button class="icon-btn" id="refresh-btn" title="refresh now">⟳</button>
+        <span class="live" id="live-pill"><i></i>live</span>
+      </div>
+    </header>
+
+    <section class="view" id="view" aria-live="polite"></section>
+  </main>
+</div>
+
+<div id="drawer" class="drawer" hidden>
+  <div class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+    <header class="drawer-head">
+      <h2 id="drawer-title">group</h2>
+      <button class="icon-btn" id="drawer-close" aria-label="close">✕</button>
+    </header>
+    <div class="drawer-body" id="drawer-body"></div>
+  </div>
+</div>
+
+<div id="modal" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <h2 id="modal-title">confirm</h2>
+    <div id="modal-body"></div>
+    <footer class="modal-foot" id="modal-foot"></footer>
+  </div>
+</div>
+
+<div id="palette" class="palette" hidden>
+  <div class="palette-card">
+    <input id="palette-input" type="text" placeholder="type a command or group name…" autocomplete="off">
+    <ul id="palette-list"></ul>
+    <footer><kbd>↑</kbd><kbd>↓</kbd> navigate <kbd>↵</kbd> run <kbd>esc</kbd> close</footer>
+  </div>
+</div>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+
+<script src="/static/app.js" defer></script>
+</body>
+</html>
