@@ -492,6 +492,284 @@ function pageSettings() {
     </section>`;
 }
 
+/* ------------------------------------------------------------ moderation --- */
+const matchCase = (entry) => {
+  const needle = App.ui.caseQuery.trim().toLowerCase();
+  if (!needle) return true;
+  return [entry.user, entry.username, entry.reason, entry.chat, entry.user_id, entry.chat_id]
+    .some((value) => String(value ?? '').toLowerCase().includes(needle));
+};
+
+const caseRow = (entry) => `
+  <tr data-action="open-user" data-user="${esc(entry.user_id)}">
+    <td><strong>${esc(entry.user)}</strong>${entry.username ? ` <span class="muted">@${esc(entry.username)}</span>` : ''}</td>
+    <td class="muted">${esc(entry.chat)}</td>
+    <td>${esc(entry.reason)}</td>
+    <td class="muted">${esc(entry.age)}</td>
+    <td class="mono muted">#${esc(entry.id)}</td>
+  </tr>`;
+
+function pageModeration() {
+  const d = App.data.moderation;
+  if (!d) return skeleton();
+  const cases = d.cases || [];
+  const shown = cases.filter(matchCase);
+  const offenders = d.offenders || [];
+  const chats = d.chats || [];
+  return `
+    <section class="kpis">${(d.kpis || []).map(kpiCard).join('')}</section>
+
+    <section class="two-col">
+      <div class="card">
+        <div class="card-head">
+          <h2>Warnings per day</h2>
+          <span class="sub">last ${d.window_days} days</span>
+        </div>
+        <div class="btn-row">
+          ${[7, 30].map((days) => `
+            <button class="btn ${App.ui.modDays === days ? 'btn-primary' : ''}"
+              data-action="window" data-days="${days}">${days} days</button>`).join('')}
+        </div>
+        <canvas id="mod-chart" height="180"></canvas>
+        <p class="muted" style="font-size:12.5px;margin:12px 0 0">
+          ${num(shown.length)} case${shown.length === 1 ? '' : 's'} in this window
+        </p>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>Repeat offenders</h2><span class="sub">most warnings</span></div>
+        ${offenders.length ? `
+          <div class="kv">
+            ${offenders.map((o) => `
+              <div class="kv-row" data-action="open-user" data-user="${esc(o.user_id)}" style="cursor:pointer">
+                <span>🏆 ${esc(o.name)}${o.username ? ` <span class="muted">@${esc(o.username)}</span>` : ''}</span>
+                <span>${num(o.warnings)} warnings · ${num(o.groups)} group(s)</span>
+              </div>`).join('')}
+          </div>` : empty('🕊', 'nobody has been warned yet')}
+      </div>
+    </section>
+
+    <section class="two-col">
+      <div class="card">
+        <div class="card-head"><h2>Busiest groups</h2><span class="sub">where the trouble is</span></div>
+        ${chats.length ? `
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>group</th><th>chat id</th><th class="num">warnings</th></tr></thead>
+              <tbody>
+                ${chats.map((c) => `
+                  <tr data-action="open-group" data-chat="${esc(c.chat_id)}">
+                    <td><strong>${esc(c.title)}</strong></td>
+                    <td class="mono">${esc(c.chat_id)}</td>
+                    <td class="num">${num(c.warnings)}</td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>` : empty('💬', 'no warned groups yet')}
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>How the guard escalates</h2></div>
+        <div class="kv">
+          ${kvRow('⚠️ warn', 'the case is recorded, the member is mentioned')}
+          ${kvRow('🏝 mute / restrict', 'permissions are taken away for a window')}
+          ${kvRow('🚫 ban', 'after the chat warn limit, or on the first strike for hard rules')}
+          ${kvRow('🧾 every step', 'lands in the log channel and here as a case file')}
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>Case files</h2>
+        <span class="sub">click a row for the member's whole history</span>
+      </div>
+      <label class="field">
+        <span>filter</span>
+        <input id="case-search" placeholder="member, reason or group…" value="${esc(App.ui.caseQuery)}">
+      </label>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>member</th><th>group</th><th>reason</th><th>when</th><th>case</th></tr></thead>
+          <tbody>
+            ${shown.map(caseRow).join('') || `<tr><td colspan="5">${empty('🌙', 'no cases match that filter')}</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </section>`;
+}
+
+/* ----------------------------------------------------------------- users --- */
+function pageUsers() {
+  const d = App.data.users;
+  if (!d) return skeleton();
+  const filters = [['all', 'everyone'], ['banned', 'blocked only']];
+  const users = d.users || [];
+  return `
+    <section class="card">
+      <div class="card-head">
+        <h2>Users</h2>
+        <span class="sub">${d.count} shown</span>
+      </div>
+      <div class="btn-row">
+        ${filters.map(([key, label]) => `
+          <button class="btn ${App.ui.userFilter === key ? 'btn-primary' : ''}"
+            data-action="user-filter" data-filter="${key}">${label}</button>`).join('')}
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>member</th><th>user id</th><th class="num">warnings</th><th class="num">/start</th><th>last seen</th><th>status</th><th></th></tr>
+          </thead>
+          <tbody>
+            ${users.map((u) => `
+              <tr data-action="open-user" data-user="${esc(u.user_id)}">
+                <td>
+                  <strong>${esc(u.name)}</strong>
+                  ${u.username ? ` <span class="muted">@${esc(u.username)}</span>` : ''}
+                  ${u.premium ? ' <span class="pill">⭐ premium</span>' : ''}
+                </td>
+                <td class="mono">${esc(u.user_id)}</td>
+                <td class="num">${num(u.warnings)}</td>
+                <td class="num">${num(u.starts)}</td>
+                <td class="muted">${esc(String(u.last_seen).slice(0, 10))}</td>
+                <td>${u.banned ? '<span class="pill bad">blocked</span>' : '<span class="pill ok">allowed</span>'}</td>
+                <td>
+                  <button class="btn btn-ghost" title="${u.banned ? 'unblock' : 'block'}"
+                    data-action="user-action" data-user="${esc(u.user_id)}" data-op="${u.banned ? 'unban' : 'ban'}">
+                    ${u.banned ? '✅' : '🚫'}
+                  </button>
+                </td>
+              </tr>`).join('') || `<tr><td colspan="7">${empty('🔍', 'nobody matches that search')}</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+      <p class="muted" style="font-size:12.5px;margin:14px 0 0">
+        blocking here is the bot-wide ban the middleware enforces - it does not touch Telegram itself.
+      </p>
+    </section>`;
+}
+
+/* ----------------------------------------------------------------- music --- */
+function musicRoomCard(room) {
+  const st = room.state || {};
+  const tracks = room.queue?.tracks || [];
+  const chatId = esc(st.chat_id);
+  const percent = st.duration ? Math.min(100, ((st.position || 0) / st.duration) * 100) : 40;
+  return `
+    <div class="card">
+      <div class="card-head">
+        <h2>${esc(st.chat || st.chat_id)}</h2>
+        <span class="sub">${st.connected ? 'connected' : 'waiting for the assistant'} · ${st.paused ? 'paused' : 'playing'} · ${esc(st.loop || 'loop off')}</span>
+      </div>
+      <div class="np">
+        ${st.thumbnail
+          ? `<img class="np-cover" src="${esc(st.thumbnail)}" alt="" loading="lazy">`
+          : '<div class="np-cover np-cover-empty">🎧</div>'}
+        <div class="np-body">
+          <strong>${esc(st.title || 'nothing playing')}</strong>
+          <span class="muted">
+            ${esc(st.uploader || '')}${st.requested_name ? ` · asked by ${esc(st.requested_name)}` : ''}
+          </span>
+          <div class="np-bar"><span style="width:${percent}%"></span></div>
+          <span class="mono muted">${esc(st.progress_text || '--:--')} · ${num(room.queue?.size || 0)} queued · volume ${num(st.volume ?? 0)}%</span>
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-primary" data-action="music" data-chat="${chatId}" data-op="toggle">${st.paused ? '▶️ Resume' : '⏸ Pause'}</button>
+        <button class="btn" data-action="music" data-chat="${chatId}" data-op="skip">⏭ Skip</button>
+        <button class="btn" data-action="music" data-chat="${chatId}" data-op="shuffle">🔀 Shuffle</button>
+        <button class="btn" data-action="music" data-chat="${chatId}" data-op="loop">🔁 Loop</button>
+        <button class="btn" data-action="music" data-chat="${chatId}" data-op="replay">↩️ Replay</button>
+        <button class="btn btn-danger" data-action="music" data-chat="${chatId}" data-op="stop">⛔ Stop</button>
+      </div>
+      ${tracks.length ? `
+        <div class="kv">
+          ${tracks.map((t) => `
+            <div class="kv-row">
+              <span>${num(t.position)}. ${esc(t.title)}</span>
+              <span class="muted">${esc(t.duration_text || '')}${t.requested_name ? ` · ${esc(t.requested_name)}` : ''}</span>
+            </div>`).join('')}
+        </div>` : `<p class="muted" style="font-size:12.5px;margin:14px 0 0">nothing waiting - the room is on autoplay</p>`}
+    </div>`;
+}
+
+function pageMusic() {
+  const d = App.data.music;
+  if (!d) return skeleton();
+  const caps = d.capabilities || {};
+  const ready = Boolean(caps.ready);
+  const rooms = d.rooms || [];
+  const playlists = d.playlists || [];
+  return `
+    <section class="kpis">
+      ${kpiCard({ icon: '🎧', label: 'streaming now', value: d.playing, delta: `${rooms.length} room(s)` })}
+      ${kpiCard({ icon: '📋', label: 'queued tracks', value: d.queued, delta: 'across every room' })}
+      ${kpiCard({ icon: '💾', label: 'playlists', value: playlists.length, delta: 'saved by members' })}
+      ${kpiCard({
+        icon: ready ? '✅' : '⚠️',
+        label: 'audio backend',
+        value: (d.backend && d.backend.name) || 'none',
+        delta: ready ? 'ready' : (caps.note || 'not installed'),
+      })}
+    </section>
+
+    ${!ready ? `
+      <section class="card">
+        <div class="card-head"><h2>Make sound</h2><span class="sub">the queue and the panel already work without it</span></div>
+        <div class="kv">
+          ${kvRow('🎵 yt-dlp', caps.yt_dlp ? '<span class="pill ok">installed</span>' : '<span class="pill bad">missing</span>')}
+          ${kvRow('📞 py-tgcalls', caps.pytgcalls ? '<span class="pill ok">installed</span>' : '<span class="pill bad">missing</span>')}
+          ${kvRow('🎚 ffmpeg', caps.ffmpeg ? '<span class="pill ok">installed</span>' : '<span class="pill bad">missing</span>')}
+          ${kvRow('🍪 cookies', caps.cookies ? '<span class="pill ok">loaded</span>' : '<span class="pill">none</span>')}
+        </div>
+        <div class="btn-row"><code class="mono">pip install "gohan[voice]"</code></div>
+      </section>` : ''}
+
+    <section class="two-col">
+      ${rooms.map(musicRoomCard).join('') || `
+        <div class="card">
+          <div class="card-head"><h2>Nothing is playing</h2></div>
+          ${empty('🎧', 'start a track with /play in a group')}
+        </div>`}
+      <div class="card">
+        <div class="card-head"><h2>Playlists</h2><span class="sub">${playlists.length} saved</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>name</th><th>owner</th><th class="num">tracks</th><th></th></tr></thead>
+            <tbody>
+              ${playlists.map((pl) => `
+                <tr>
+                  <td><strong>${esc(pl.name)}</strong></td>
+                  <td class="muted">${esc(pl.owner)}</td>
+                  <td class="num">${num(pl.tracks)}</td>
+                  <td><button class="btn btn-ghost" data-action="delete-playlist" data-id="${esc(pl.id)}">🗑</button></td>
+                </tr>`).join('') || `<tr><td colspan="4">${empty('💾', 'no playlists yet')}</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="two-col">
+      <div class="card">
+        <div class="card-head"><h2>Away right now</h2><span class="sub">/afk</span></div>
+        <div class="kv">
+          ${(d.afk || []).map((entry) => kvRow(`😴 ${esc(entry.user)}`, `${esc(entry.reason || 'no reason')} · ${esc(entry.chat)}`)).join('')
+            || empty('✅', 'everybody is around')}
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>Player controllers</h2><span class="sub">/authlist</span></div>
+        <div class="kv">
+          ${(d.controllers || []).map((entry) => kvRow(`👑 ${esc(entry.user)}`, esc(entry.chat))).join('')
+            || empty('🛡', 'only admins can control playback')}
+        </div>
+      </div>
+    </section>`;
+}
+
+
 const kvRow = (label, value) => `<div class="kv-row"><span>${label}</span><span>${value}</span></div>`;
 const skeleton = () => `
   <section class="kpis">${'<div class="skeleton" style="height:106px"></div>'.repeat(6)}</section>
@@ -501,6 +779,7 @@ const skeleton = () => `
 /* ------------------------------------------------------------ rendering --- */
 const PAGES = {
   overview: { title: 'Overview', sub: 'everything the bot is doing, live', render: pageOverview, search: false },
+  music: { title: 'Music', sub: 'what every voice chat is playing, live', render: pageMusic, search: false },
   moderation: { title: 'Moderation', sub: 'cases, offenders and the busiest groups', render: pageModeration, search: false },
   users: { title: 'Users', sub: 'look anyone up and act', render: pageUsers, search: true },
   modules: { title: 'Modules', sub: 'every switch in one place', render: pageModules, search: true },
@@ -560,6 +839,12 @@ async function loadEvents({ quiet = false } = {}) {
 async function loadSettings() {
   App.data.settings = await api('/api/settings');
 }
+async function loadMusic() {
+  App.data.music = await api('/api/music');
+  const badge = $('#badge-music');
+  if (badge) badge.textContent = num(App.data.music.playing || 0);
+}
+
 async function loadModeration(days = App.ui.modDays) {
   App.data.moderation = await api(`/api/moderation?days=${encodeURIComponent(days)}&limit=60`);
 }
@@ -574,6 +859,7 @@ async function refresh({ silent = false } = {}) {
     if (App.page === 'groups') await loadGroups();
     if (App.page === 'events' && !App.ui.paused) await loadEvents({ quiet: true });
     if (App.page === 'settings') await loadSettings();
+    if (App.page === 'music') await loadMusic();
     if (App.page === 'moderation') await loadModeration();
     if (App.page === 'users') await loadUsers();
     if (!silent) render();
@@ -789,11 +1075,48 @@ async function userAction(userId, op) {
     toast('ok', result.message || op, result.demo ? 'demo no-op' : '');
     closeDrawer();
     if (App.page === 'users') await loadUsers();
+    if (App.page === 'music') await loadMusic();
     if (App.page === 'moderation') await loadModeration();
     render();
   } catch (error) {
     toast('err', `${op} failed`, error.message);
   }
+}
+
+async function musicAction(chatId, op) {
+  try {
+    const result = await api(`/api/music/${encodeURIComponent(chatId)}/actions/${encodeURIComponent(op)}`, {
+      method: 'POST', body: {},
+    });
+    if (result.demo) toast('ok', `${op} (demo)`, 'this preview has no live rooms');
+    else toast('ok', op, 'sent to the voice chat');
+    await loadMusic();
+    render();
+  } catch (error) {
+    toast('err', 'the player refused', error.message);
+  }
+}
+
+function deletePlaylist(playlistId) {
+  showModal({
+    title: 'Delete this playlist?',
+    body: 'The saved list goes away; the tracks themselves stay on Telegram.',
+    confirmLabel: '🗑 Delete',
+    danger: true,
+    onConfirm: async () => {
+      try {
+        const result = await api(`/api/playlists/${encodeURIComponent(playlistId)}/delete`, {
+          method: 'POST', body: {},
+        });
+        toast('ok', 'playlist deleted', result.demo ? 'demo no-op' : `${result.removed_tracks} track(s) dropped`);
+        await loadMusic();
+        render();
+      } catch (error) {
+        toast('err', 'could not delete', error.message);
+      }
+      closeModal();
+    },
+  });
 }
 
 async function applyModuleAll(key, enabled) {
@@ -857,6 +1180,7 @@ function paletteItems() {
     { icon: '📊', label: 'Overview', hint: 'page', run: () => go('overview') },
     { icon: '🧩', label: 'Modules', hint: 'page', run: () => go('modules') },
     { icon: '💬', label: 'Groups', hint: 'page', run: () => go('groups') },
+    { icon: '🎧', label: 'Music', hint: 'page', run: () => go('music') },
     { icon: '🛡', label: 'Moderation', hint: 'page', run: () => go('moderation') },
     { icon: '👥', label: 'Users', hint: 'page', run: () => go('users') },
     { icon: '📨', label: 'Events', hint: 'page', run: () => go('events') },
@@ -966,22 +1290,21 @@ function wire() {
       return;
     }
 
-    const groupRow = event.target.closest('[data-action="open-group"]');
-    if (groupRow) { openGroup(groupRow.dataset.chat); return; }
-
-    const userRow = event.target.closest('[data-action="open-user"]');
-    if (userRow) { openUser(userRow.dataset.user); return; }
-
+    // the innermost [data-action] wins, so a button inside a clickable row still
+    // runs its own action instead of opening the row drawer
     const action = event.target.closest('[data-action]');
     if (action) {
       const name = action.dataset.action;
-      if (name === 'broadcast') askBroadcast();
+      if (name === 'open-group') openGroup(action.dataset.chat);
+      else if (name === 'broadcast') askBroadcast();
       else if (name === 'run') await runAction(action.dataset.name);
       else if (name === 'open-user') openUser(action.dataset.user);
       else if (name === 'user-action') await userAction(action.dataset.user, action.dataset.op);
       else if (name === 'save-group') await saveGroupSettings(action.dataset.chat);
       else if (name === 'apply-all') await applyModuleAll(action.dataset.key, action.dataset.on !== '1');
       else if (name === 'user-filter') { App.ui.userFilter = action.dataset.filter; await loadUsers(); render(); }
+      else if (name === 'music') await musicAction(action.dataset.chat, action.dataset.op);
+      else if (name === 'delete-playlist') await deletePlaylist(action.dataset.id);
       else if (name === 'window') { App.ui.modDays = Number(action.dataset.days); await loadModeration(); render(); }
       else if (name === 'lifecycle') askLifecycle(action.dataset.name);
       else if (name === 'toggle-maintenance') await toggleMaintenance();

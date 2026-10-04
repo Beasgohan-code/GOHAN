@@ -22,6 +22,11 @@ from .modules import MODULES, categories, chat_modules, global_modules, module
 
 log = get_logger("web.state")
 
+#: everything the Music page may ask a player to do
+MUSIC_ACTIONS = frozenset(
+    {"toggle", "skip", "stop", "replay", "shuffle", "loop", "autoplay", "mute", "volume", "seek", "clear"}
+)
+
 __all__ = ["EDITABLE_CHAT_KEYS", "WebState", "build_state"]
 
 #: Text/number chat settings an admin may edit from the browser panel.
@@ -771,6 +776,191 @@ class WebState:
             }
             for i in range(days)
         ]
+
+    # -- music / voice -------------------------------------------------------
+
+    async def music(self) -> dict[str, Any]:
+        """Now playing, the queues, playlists and controllers - the Music page."""
+        from ..voice import capabilities as voice_capabilities
+
+        caps = voice_capabilities(self.settings)
+        player = self.service("player")
+        rooms: list[dict[str, Any]] = []
+        backend: dict[str, Any] = {"name": "detached", "available": False, "note": "voice engine not attached"}
+        if player is not None:
+            for room in player.active():
+                rooms.append(room.snapshot(backend=player.backend_name, queue_limit=25))
+            backend = player.backend.status().to_dict() if hasattr(player.backend, "status") else backend
+
+        if self.live:
+            playlists = [
+                {
+                    "id": int(row["id"]),
+                    "name": row["name"],
+                    "owner": row["first_name"] or (f"@{row['username']}" if row["username"] else str(row["owner_id"])),
+                    "owner_id": int(row["owner_id"]),
+                    "tracks": int(row["tracks"] or 0),
+                }
+                for row in await self.db.all_playlists(limit=60)
+            ]
+            controllers = [
+                {
+                    "chat_id": int(row["chat_id"]),
+                    "chat": row["chat_title"] or str(row["chat_id"]),
+                    "user_id": int(row["user_id"]),
+                    "user": row["first_name"] or (f"@{row['username']}" if row["username"] else str(row["user_id"])),
+                }
+                for row in await self.db.voice_controllers(limit=60)
+            ]
+            afk = [
+                {
+                    "user_id": int(row["user_id"]),
+                    "user": row["first_name"] or (f"@{row['username']}" if row["username"] else str(row["user_id"])),
+                    "chat": row["chat_title"] or str(row["chat_id"]),
+                    "reason": row["reason"] or "",
+                    "since": _now_iso(row["since"]),
+                }
+                for row in await self.db.all_afk(limit=60)
+            ]
+        else:
+            playlists = [
+                {"id": 1, "name": "lofi nights", "owner": "you", "owner_id": 42, "tracks": 12},
+                {"id": 2, "name": "workout", "owner": "you", "owner_id": 42, "tracks": 8},
+                {"id": 3, "name": "hindi classics", "owner": "meera", "owner_id": 7, "tracks": 24},
+            ]
+            controllers = [
+                {"chat_id": _DEMO_GROUPS[0][0], "chat": _DEMO_GROUPS[0][1], "user_id": 7, "user": "meera"},
+            ]
+            afk = [
+                {"user_id": 555000333, "user": "Quiet One", "chat": _DEMO_GROUPS[0][1], "reason": "sleeping", "since": "12 min ago"},
+            ]
+            rooms = [self._demo_room()]
+
+        return {
+            "ok": True,
+            "demo": not self.live,
+            "backend": backend,
+            "capabilities": {
+                "yt_dlp": caps.yt_dlp,
+                "ffmpeg": caps.ffmpeg,
+                "cookies": caps.cookies,
+                "pytgcalls": caps.pytgcalls,
+                "ready": caps.ready,
+                "note": caps.note,
+            },
+            "rooms": rooms,
+            "playing": sum(1 for room in rooms if room["state"].get("playing")),
+            "queued": sum(int(room["queue"].get("size", 0)) for room in rooms),
+            "playlists": playlists,
+            "controllers": controllers,
+            "afk": afk,
+        }
+
+    def _demo_room(self) -> dict[str, Any]:
+        """A believable room for the offline preview."""
+        rng = random.Random(self.demo_seed + 11)
+        title = "Midnight City"
+        queue = [
+            {
+                "position": index,
+                "title": name,
+                "duration": 200 + index * 13,
+                "duration_text": f"{(200 + index * 13) // 60}:{(200 + index * 13) % 60:02d}",
+                "requested_name": "meera",
+            }
+            for index, name in enumerate(["Sunset Drive", "Neon Lights", "After Hours"], start=1)
+        ]
+        return {
+            "state": {
+                "chat_id": _DEMO_GROUPS[0][0],
+                "chat": _DEMO_GROUPS[0][1],
+                "title": title,
+                "url": "https://youtu.be/demo",
+                "thumbnail": None,
+                "source": "youtube",
+                "uploader": "M83",
+                "requested_name": "meera",
+                "position": 74.0,
+                "position_text": "1:14",
+                "duration": 244,
+                "duration_text": "4:04",
+                "progress_text": "1:14 / 4:04",
+                "paused": False,
+                "muted": False,
+                "volume": 80,
+                "speed": 1.0,
+                "loop": "off",
+                "autoplay": True,
+                "queue_length": len(queue),
+                "queue_duration": sum(entry["duration"] for entry in queue),
+                "queue_duration_text": "12:17",
+                "connected": True,
+                "playing": True,
+                "backend": "null",
+                "live": False,
+            },
+            "queue": {
+                "chat_id": _DEMO_GROUPS[0][0],
+                "size": len(queue),
+                "loop": "off",
+                "total_duration": sum(entry["duration"] for entry in queue),
+                "total_text": "12:17",
+                "tracks": queue,
+            },
+            "panel": None,
+        }
+
+    async def music_action(self, chat_id: int, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Pause / skip / stop / loop / volume … from the browser."""
+        payload = payload or {}
+        if action not in MUSIC_ACTIONS:
+            return {"ok": False, "error": f"unknown action {action!r}"}
+        player = self.service("player")
+        if not self.live:
+            return {"ok": True, "demo": True, "action": action, "message": f"{action} is a demo no-op"}
+        if player is None:
+            return {"ok": False, "error": "the voice engine is not attached"}
+        room = player.rooms.get(int(chat_id))
+        if room is None and action != "nothing":
+            return {"ok": False, "error": "no voice chat is active there"}
+
+        if action == "toggle":
+            await player.toggle(chat_id)
+        elif action == "skip":
+            await player.skip(chat_id)
+        elif action == "stop":
+            await player.stop(chat_id, leave=True)
+        elif action == "replay":
+            await player.replay(chat_id)
+        elif action == "shuffle":
+            await player.shuffle(chat_id)
+        elif action == "loop":
+            mode = payload.get("mode")
+            await player.loop(chat_id, mode)
+        elif action == "autoplay":
+            await player.autoplay(chat_id, bool(payload.get("enabled", True)))
+        elif action == "mute":
+            await player.mute(chat_id, bool(payload.get("muted", True)))
+        elif action == "volume":
+            await player.volume(chat_id, int(payload.get("value", room.volume)))
+        elif action == "seek":
+            await player.seek(chat_id, int(payload.get("value", 0)))
+        elif action == "clear":
+            room.queue.clear()
+        else:
+            return {"ok": False, "error": f"unknown action {action!r}"}
+
+        await self.db.log_event("WebVoice", chat_id=int(chat_id), data={"action": action})
+        snapshot = player.snapshot(chat_id)
+        return {"ok": True, "action": action, "room": snapshot}
+
+    async def delete_playlist(self, playlist_id: int) -> dict[str, Any]:
+        """Remove a playlist (and its tracks) from the browser."""
+        if not self.live:
+            return {"ok": True, "demo": True, "playlist_id": playlist_id}
+        removed = await self.db.delete_playlist(int(playlist_id))
+        await self.db.log_event("WebPlaylist", data={"playlist_id": playlist_id, "tracks": removed})
+        return {"ok": True, "playlist_id": int(playlist_id), "removed_tracks": removed}
 
     # -- events --------------------------------------------------------------
 

@@ -256,6 +256,17 @@ def _check(settings: Any) -> int:
     except Exception as exc:
         _say(f"  ! richgram missing (rich messages fall back to HTML): {exc}")
 
+    # voice / music
+    from .voice import capabilities as voice_capabilities
+
+    caps = voice_capabilities(settings)
+    _say(
+        f"  {'✓' if caps.ready else '!'} voice: yt-dlp {'yes' if caps.yt_dlp else 'no'}"
+        f" · py-tgcalls {'yes' if caps.pytgcalls else 'no'}"
+        f" · ffmpeg {'yes' if caps.ffmpeg else 'no'}"
+        f" · {caps.note}"
+    )
+
     # rich layer
     from .rich import RICH_AVAILABLE
     from .rich import emoji as registry
@@ -304,6 +315,8 @@ def _check(settings: Any) -> int:
             "store": None,
             "mtproto": None,
             "watchdog": None,
+            "player": None,
+            "afk": None,
         }
         _dp, order = build_dispatcher(settings, services)
         _say(f"  ✓ routers ({len(order)}): {', '.join(order)}")
@@ -312,7 +325,7 @@ def _check(settings: Any) -> int:
         ok = False
 
     _say()
-    _say("  ready to run:  python -m gohan" if ok else "  fix the ✗ items above, then re-run --check")
+    _say("  ready to run:  python -m gohan" if ok else "  fix the ✗ / ! items above, then re-run --check")
     _say()
     return 0 if ok else 1
 

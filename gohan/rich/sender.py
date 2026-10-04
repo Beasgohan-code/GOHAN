@@ -26,6 +26,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.types import (
     Chat,
+    EphemeralMessageParameters,
     InlineKeyboardMarkup,
     InputRichMessage,
     Message,
@@ -94,6 +95,20 @@ def _open_tags(html: str) -> list[str]:
     return stack
 
 
+def ephemeral_parameters(
+    *,
+    receiver_user_id: int | None = None,
+    callback_query_id: str | None = None,
+    replace_callback_query_message: bool | None = None,
+) -> EphemeralMessageParameters:
+    """Bot API 10.x: a message only ``receiver_user_id`` ever sees."""
+    return EphemeralMessageParameters(
+        receiver_user_id=receiver_user_id,
+        callback_query_id=callback_query_id,
+        replace_callback_query_message=replace_callback_query_message,
+    )
+
+
 def validate_html(html: str, *, max_chars: int = MAX_CHARS) -> str:
     """Clamp ``html`` to Telegram's limit without breaking the markup.
 
@@ -149,9 +164,14 @@ async def rich_send(
     message_effect_id: str | None = None,
     is_rtl: bool | None = None,
     skip_entity_detection: bool | None = None,
+    ephemeral: EphemeralMessageParameters | None = None,
     fallback: bool = True,
 ) -> Message | None:
-    """Send a rich message, falling back to plain text if Telegram refuses it."""
+    """Send a rich message, falling back to plain text if Telegram refuses it.
+
+    ``ephemeral`` posts it so that only one person can see it - the buttons of a
+    group's music panel belong to whoever pressed them, not to the whole chat.
+    """
     payload = validate_html(html)
     try:
         return await bot.send_rich_message(
@@ -168,6 +188,7 @@ async def rich_send(
             protect_content=protect_content,
             allow_paid_broadcast=allow_paid_broadcast,
             message_effect_id=message_effect_id,
+            ephemeral_message_parameters=ephemeral,
         )
     except TelegramBadRequest as exc:
         if not fallback:
@@ -188,6 +209,7 @@ async def rich_send(
             business_connection_id=business_connection_id,
             reply_parameters=reply_parameters,
             disable_notification=disable_notification,
+            ephemeral_message_parameters=ephemeral,
         )
     except TelegramAPIError as exc:
         log.error("plain fallback also failed: %s", exc)
@@ -343,4 +365,82 @@ async def safe_chat(bot: Bot, chat_id: int | str) -> Chat | None:
         return None
 
 
-__all__ += ["safe_chat", "MessageEntity"]
+# ---------------------------------------------------------------------------
+#  ephemeral messages (Bot API 9.5+/10.x): one person, one message
+# ---------------------------------------------------------------------------
+
+
+async def ephemeral_send(
+    bot: Bot,
+    chat_id: int | str,
+    html: str,
+    *,
+    receiver_user_id: int | None = None,
+    callback_query_id: str | None = None,
+    replace_callback_query: bool = False,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> Message | None:
+    """Send rich content only ``receiver_user_id`` can see.
+
+    With ``replace_callback_query`` the message that carried the button is
+    swapped for this one - that is how a control panel stays in place without
+    ever touching the chat's history.
+    """
+    payload = validate_html(html)
+    params = ephemeral_parameters(
+        receiver_user_id=receiver_user_id,
+        callback_query_id=callback_query_id,
+        replace_callback_query_message=replace_callback_query if callback_query_id else None,
+    )
+    try:
+        return await bot.send_rich_message(
+            chat_id=chat_id,
+            rich_message=input_rich(payload),
+            reply_markup=reply_markup,
+            ephemeral_message_parameters=params,
+        )
+    except TelegramAPIError as exc:
+        log.debug("ephemeral rich send rejected (%s); falling back to sent message", exc)
+    try:
+        return await bot.send_message(
+            chat_id=chat_id,
+            text=_plain_fallback(html),
+            reply_markup=reply_markup,
+            ephemeral_message_parameters=params,
+        )
+    except TelegramAPIError as exc:
+        log.warning("ephemeral send failed: %s", exc)
+        return None
+
+
+async def ephemeral_edit(
+    bot: Bot,
+    chat_id: int | str,
+    html: str,
+    *,
+    receiver_user_id: int,
+    ephemeral_message_id: int,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> bool:
+    """Edit an ephemeral message in place (``edit_ephemeral_message_text``)."""
+    try:
+        return bool(
+            await bot.edit_ephemeral_message_text(
+                chat_id=chat_id,
+                receiver_user_id=int(receiver_user_id),
+                ephemeral_message_id=int(ephemeral_message_id),
+                rich_message=input_rich(validate_html(html)),
+                reply_markup=reply_markup,
+            )
+        )
+    except TelegramBadRequest as exc:
+        if "not modified" in (exc.message or "").lower():
+            return True
+        log.debug("ephemeral edit rejected: %s", exc.message[:160])
+        return False
+    except TelegramAPIError as exc:
+        log.debug("ephemeral edit failed: %s", exc)
+        return False
+
+
+__all__ += ["MessageEntity", "ephemeral_edit", "ephemeral_parameters", "ephemeral_send", "safe_chat"]

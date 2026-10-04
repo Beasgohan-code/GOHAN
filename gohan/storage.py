@@ -122,6 +122,48 @@ CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS playlists (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_id   INTEGER NOT NULL,
+    name       TEXT NOT NULL,
+    is_public  INTEGER DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_playlists_owner ON playlists(owner_id);
+
+CREATE TABLE IF NOT EXISTS playlist_tracks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+    position    INTEGER NOT NULL DEFAULT 0,
+    title       TEXT NOT NULL,
+    url         TEXT NOT NULL,
+    duration    INTEGER,
+    video_id    TEXT,
+    uploader    TEXT,
+    thumbnail   TEXT,
+    source      TEXT DEFAULT 'youtube',
+    added_by    INTEGER,
+    added_at    REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_playlist_tracks ON playlist_tracks(playlist_id, position);
+
+CREATE TABLE IF NOT EXISTS afk (
+    user_id  INTEGER NOT NULL,
+    chat_id  INTEGER NOT NULL,
+    reason   TEXT,
+    since    REAL NOT NULL,
+    PRIMARY KEY (user_id, chat_id)
+);
+
+CREATE TABLE IF NOT EXISTS voice_auth (
+    chat_id  INTEGER NOT NULL,
+    user_id  INTEGER NOT NULL,
+    added_by INTEGER,
+    added_at REAL NOT NULL,
+    PRIMARY KEY (chat_id, user_id)
+);
 """
 
 
@@ -212,6 +254,22 @@ class Database:
         async with self._lock:
             await self._conn().execute(sql, params)
             await self._conn().commit()
+
+    async def insert(self, sql: str, params: Sequence[Any] = ()) -> int:
+        """Run an ``INSERT`` and return ``lastrowid``."""
+        async with self._lock:
+            cursor = await self._conn().execute(sql, params)
+            await self._conn().commit()
+            return int(cursor.lastrowid or 0)
+
+    async def executemany(self, sql: str, rows: Sequence[Sequence[Any]]) -> int:
+        """Run the same statement for many parameter tuples."""
+        if not rows:
+            return 0
+        async with self._lock:
+            await self._conn().executemany(sql, rows)
+            await self._conn().commit()
+        return len(rows)
 
     async def fetch_all(self, sql: str, params: Sequence[Any] = ()) -> list[aiosqlite.Row]:
         async with self._conn().execute(sql, params) as cursor:
@@ -643,6 +701,203 @@ class Database:
         rows = await self.fetch_all("SELECT chat_id FROM chats WHERE is_active = 1")
         return [int(row["chat_id"]) for row in rows]
 
+
+    # -- playlists (music) ---------------------------------------------------
+
+    async def create_playlist(self, owner_id: int, name: str, *, is_public: bool = False) -> int:
+        stamp = now()
+        return await self.insert(
+            "INSERT INTO playlists (owner_id, name, is_public, created_at, updated_at) VALUES (?,?,?,?,?)",
+            (owner_id, name, int(is_public), stamp, stamp),
+        )
+
+    async def playlists_of(self, owner_id: int, *, limit: int = 50) -> list[aiosqlite.Row]:
+        return await self.fetch_all(
+            """
+            SELECT p.*, (SELECT COUNT(*) FROM playlist_tracks t WHERE t.playlist_id = p.id) AS tracks
+            FROM playlists p WHERE p.owner_id = ? ORDER BY p.updated_at DESC LIMIT ?
+            """,
+            (owner_id, max(1, min(int(limit), 200))),
+        )
+
+    async def all_playlists(self, *, limit: int = 200) -> list[aiosqlite.Row]:
+        return await self.fetch_all(
+            """
+            SELECT p.*, u.username, u.first_name,
+                   (SELECT COUNT(*) FROM playlist_tracks t WHERE t.playlist_id = p.id) AS tracks,
+                   (SELECT COALESCE(SUM(t.duration), 0) FROM playlist_tracks t WHERE t.playlist_id = p.id) AS duration
+            FROM playlists p LEFT JOIN users u ON u.user_id = p.owner_id
+            ORDER BY p.updated_at DESC LIMIT ?
+            """,
+            (max(1, min(int(limit), 500)),),
+        )
+
+    async def playlist(self, playlist_id: int) -> aiosqlite.Row | None:
+        return await self.fetch_one("SELECT * FROM playlists WHERE id = ?", (playlist_id,))
+
+    async def find_playlist(self, owner_id: int, name: str) -> aiosqlite.Row | None:
+        return await self.fetch_one(
+            "SELECT * FROM playlists WHERE owner_id = ? AND LOWER(name) = ?",
+            (owner_id, str(name).strip().lower()),
+        )
+
+    async def rename_playlist(self, playlist_id: int, name: str) -> bool:
+        await self.execute(
+            "UPDATE playlists SET name = ?, updated_at = ? WHERE id = ?", (name, now(), playlist_id)
+        )
+        row = await self.playlist(playlist_id)
+        return row is not None
+
+    async def delete_playlist(self, playlist_id: int) -> int:
+        count = await self.playlist_track_count(playlist_id)
+        await self.execute("DELETE FROM playlist_tracks WHERE playlist_id = ?", (playlist_id,))
+        await self.execute("DELETE FROM playlists WHERE id = ?", (playlist_id,))
+        return count
+
+    async def add_playlist_tracks(
+        self, playlist_id: int, tracks: Sequence[dict[str, Any]], *, added_by: int | None = None
+    ) -> int:
+        if not tracks:
+            return 0
+        start = int(
+            await self.fetch_value(
+                "SELECT COALESCE(MAX(position), 0) FROM playlist_tracks WHERE playlist_id = ?",
+                (playlist_id,),
+                0,
+            )
+        )
+        stamp = now()
+        rows = [
+            (
+                playlist_id,
+                start + index,
+                str(track.get("title") or "unknown")[:300],
+                str(track.get("url") or ""),
+                track.get("duration"),
+                track.get("video_id"),
+                track.get("uploader"),
+                track.get("thumbnail"),
+                track.get("source") or "youtube",
+                added_by,
+                stamp,
+            )
+            for index, track in enumerate(tracks, start=1)
+        ]
+        await self.executemany(
+            "INSERT INTO playlist_tracks (playlist_id, position, title, url, duration, video_id,"
+            " uploader, thumbnail, source, added_by, added_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        await self.execute("UPDATE playlists SET updated_at = ? WHERE id = ?", (stamp, playlist_id))
+        return len(rows)
+
+    async def playlist_tracks(
+        self, playlist_id: int, *, offset: int = 0, limit: int = 500
+    ) -> list[aiosqlite.Row]:
+        return await self.fetch_all(
+            "SELECT * FROM playlist_tracks WHERE playlist_id = ? ORDER BY position LIMIT ? OFFSET ?",
+            (playlist_id, max(1, min(int(limit), 1000)), max(0, int(offset))),
+        )
+
+    async def playlist_track_count(self, playlist_id: int) -> int:
+        return int(
+            await self.fetch_value(
+                "SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id = ?", (playlist_id,)
+            )
+        )
+
+    async def remove_playlist_track(self, playlist_id: int, position: int) -> aiosqlite.Row | None:
+        """Remove the 1-based ``position`` entry of a playlist."""
+        row = await self.fetch_one(
+            "SELECT * FROM playlist_tracks WHERE playlist_id = ? ORDER BY position LIMIT 1 OFFSET ?",
+            (playlist_id, max(0, int(position) - 1)),
+        )
+        if row is None:
+            return None
+        await self.execute("DELETE FROM playlist_tracks WHERE id = ?", (row["id"],))
+        await self.execute("UPDATE playlists SET updated_at = ? WHERE id = ?", (now(), playlist_id))
+        return row
+
+    async def clear_playlist(self, playlist_id: int) -> int:
+        count = await self.playlist_track_count(playlist_id)
+        await self.execute("DELETE FROM playlist_tracks WHERE playlist_id = ?", (playlist_id,))
+        return count
+
+    # -- afk -----------------------------------------------------------------
+
+    async def set_afk(self, user_id: int, chat_id: int, reason: str | None = None) -> None:
+        await self.execute(
+            "INSERT INTO afk (user_id, chat_id, reason, since) VALUES (?,?,?,?) "
+            "ON CONFLICT(user_id, chat_id) DO UPDATE SET reason = excluded.reason, since = excluded.since",
+            (user_id, chat_id, reason, now()),
+        )
+
+    async def afk_entry(self, user_id: int, chat_id: int) -> aiosqlite.Row | None:
+        return await self.fetch_one(
+            "SELECT * FROM afk WHERE user_id = ? AND chat_id = ?", (user_id, chat_id)
+        )
+
+    async def clear_afk(self, user_id: int, chat_id: int) -> bool:
+        row = await self.afk_entry(user_id, chat_id)
+        if row is None:
+            return False
+        await self.execute("DELETE FROM afk WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
+        return True
+
+    async def afk_in_chat(self, chat_id: int) -> list[aiosqlite.Row]:
+        return await self.fetch_all(
+            "SELECT a.*, u.first_name, u.username FROM afk a LEFT JOIN users u ON u.user_id = a.user_id "
+            "WHERE a.chat_id = ? ORDER BY a.since DESC LIMIT 100",
+            (chat_id,),
+        )
+
+    async def all_afk(self, *, limit: int = 200) -> list[aiosqlite.Row]:
+        return await self.fetch_all(
+            "SELECT a.*, u.first_name, u.username, c.title AS chat_title FROM afk a "
+            "LEFT JOIN users u ON u.user_id = a.user_id LEFT JOIN chats c ON c.chat_id = a.chat_id "
+            "ORDER BY a.since DESC LIMIT ?",
+            (max(1, min(int(limit), 500)),),
+        )
+
+    async def count_afk(self) -> int:
+        return int(await self.fetch_value("SELECT COUNT(*) FROM afk"))
+
+    # -- voice controllers ---------------------------------------------------
+
+    async def allow_voice(self, chat_id: int, user_id: int, *, added_by: int | None = None) -> bool:
+        existing = await self.is_voice_allowed(chat_id, user_id)
+        await self.execute(
+            "INSERT INTO voice_auth (chat_id, user_id, added_by, added_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(chat_id, user_id) DO NOTHING",
+            (chat_id, user_id, added_by, now()),
+        )
+        return not existing
+
+    async def deny_voice(self, chat_id: int, user_id: int) -> bool:
+        existed = await self.is_voice_allowed(chat_id, user_id)
+        await self.execute("DELETE FROM voice_auth WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+        return existed
+
+    async def voice_allowed(self, chat_id: int) -> list[int]:
+        rows = await self.fetch_all(
+            "SELECT user_id FROM voice_auth WHERE chat_id = ? ORDER BY added_at", (chat_id,)
+        )
+        return [int(row["user_id"]) for row in rows]
+
+    async def is_voice_allowed(self, chat_id: int, user_id: int) -> bool:
+        row = await self.fetch_one(
+            "SELECT 1 FROM voice_auth WHERE chat_id = ? AND user_id = ?", (chat_id, user_id)
+        )
+        return row is not None
+
+    async def voice_controllers(self, *, limit: int = 200) -> list[aiosqlite.Row]:
+        return await self.fetch_all(
+            "SELECT v.*, u.first_name, u.username, c.title AS chat_title FROM voice_auth v "
+            "LEFT JOIN users u ON u.user_id = v.user_id LEFT JOIN chats c ON c.chat_id = v.chat_id "
+            "ORDER BY v.added_at DESC LIMIT ?",
+            (max(1, min(int(limit), 500)),),
+        )
+
     # -- notes ---------------------------------------------------------------
 
     async def save_note(
@@ -836,9 +1091,25 @@ class Database:
     async def vacuum(self) -> None:
         await self.execute("VACUUM")
 
+    #: every table the schema owns, in a stable order (used by ``--check`` and the panel)
+    TABLES: tuple[str, ...] = (
+        "users",
+        "chats",
+        "warnings",
+        "notes",
+        "filters",
+        "scores",
+        "events",
+        "kv",
+        "playlists",
+        "playlist_tracks",
+        "afk",
+        "voice_auth",
+    )
+
     async def table_sizes(self) -> dict[str, int]:
         out: dict[str, int] = {}
-        for table in ("users", "chats", "warnings", "notes", "filters", "scores", "events", "kv"):
+        for table in self.TABLES:
             out[table] = int(await self.fetch_value(f"SELECT COUNT(*) FROM {table}"))
         return out
 

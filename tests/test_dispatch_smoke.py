@@ -141,8 +141,12 @@ def _services(db: Database) -> dict[str, Any]:
     settings = Settings(bot_token="123456:TEST", owner_user_ids="42", llm_provider="off")
     bot = FakeBot()
     store = ConversationStore()
+    from gohan.voice import AfkWatcher, build_player
+
     return {
         "settings": settings,
+        "player": build_player(settings, db=db),
+        "afk": AfkWatcher(db, bot),
         "db": db,
         "bot": bot,
         "ai": AIConversation(
@@ -233,7 +237,36 @@ async def test_ping_runs_without_a_reply_target(harness) -> None:
 
 async def test_every_router_is_attached(harness) -> None:
     _bot, _db, _dp, order = harness
-    assert len(order) == 12
+    assert len(order) == 13
+    assert "voice" in order, "the music player must be attached"
+    assert order.index("voice") < order.index("ai"), "the player answers before the AI catch-all"
     assert order[-2:] == ["guardian.filters", "guardian.events"], (
         "filters must run before the guard, and the guard must run last"
     )
+
+
+async def test_play_degrades_gracefully_without_ytdlp(harness, monkeypatch) -> None:
+    """No yt-dlp (or no py-tgcalls) must produce a card, never a traceback."""
+    from gohan.voice import SourceError
+    from gohan.voice import handlers as voice_handlers
+
+    async def exploding(*_args, **_kwargs):
+        raise SourceError("yt-dlp is not installed - run: pip install 'gohan[voice]'")
+
+    monkeypatch.setattr(voice_handlers, "search", exploding)
+    bot = await _dispatch(harness, [_update(_message(-1001, "/play never gonna give you up", chat_type="supergroup"), 8)])
+    assert bot.sent, "the player must explain itself"
+    body = str(bot.sent)
+    assert "yt-dlp" in body or "not installed" in body
+
+
+async def test_queue_without_a_room_explains_itself(harness) -> None:
+    bot = await _dispatch(harness, [_update(_message(-1002, "/queue", chat_type="supergroup"), 9)])
+    assert bot.sent
+    assert "no queue" in str(bot.sent).lower() or "queue" in str(bot.sent).lower()
+
+
+async def test_music_help_lists_the_command_groups(harness) -> None:
+    bot = await _dispatch(harness, [_update(_message(1, "/musichelp"), 10)])
+    body = str(bot.sent)
+    assert "/play" in body and "/queue" in body and "/loop" in body

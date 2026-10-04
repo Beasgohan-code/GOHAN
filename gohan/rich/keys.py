@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Sequence
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import DisabledButton, InlineKeyboardButton, InlineKeyboardMarkup
 
 from . import emoji as registry
 from .palette import DANGER, LINK, PRIMARY, SUCCESS, normalize, semantic_style
@@ -47,6 +47,19 @@ def _icon_id(icon: str | None) -> str | None:
     return entry.custom_id if entry is not None else None
 
 
+def _disabled(value: bool | DisabledButton | None) -> DisabledButton | None:
+    """Bot API 9.4+ expresses "grey this button out" as an empty marker model.
+
+    ``disabled=True`` is kept as the friendly spelling so callers never have to
+    import the model.
+    """
+    if value is None or value is False:
+        return None
+    if isinstance(value, DisabledButton):
+        return value
+    return DisabledButton()
+
+
 def button(
     label: Any,
     *,
@@ -54,7 +67,7 @@ def button(
     url: str | None = None,
     style: str | None = None,
     icon: str | None = None,
-    disabled: bool = False,
+    disabled: bool | DisabledButton | None = False,
 ) -> InlineKeyboardButton:
     """One coloured inline button.
 
@@ -72,7 +85,7 @@ def button(
         url=url,
         style=chosen,
         icon_custom_emoji_id=_icon_id(icon),
-        disabled=disabled or None,
+        disabled=_disabled(disabled),
     )
 
 

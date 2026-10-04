@@ -29,6 +29,8 @@ MtprotoMode = Literal["auto", "user", "bot", "off"]
 LlmProvider = Literal["off", "openai", "openai_compatible"]
 RichMode = Literal["auto", "html", "blocks"]
 WebAuthMode = Literal["off", "token", "telegram"]
+#: ``auto`` uses py-tgcalls when it imports, ``off`` keeps the player silent
+VoiceBackendMode = Literal["auto", "pytgcalls", "off"]
 
 #: PaaS environment variable -> how to build a public URL out of it.
 _PLATFORM_URL_VARS: tuple[tuple[str, str, str], ...] = (
@@ -115,6 +117,23 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr | None = None
     llm_base_url: str = "https://api.openai.com/v1"
     llm_model: str = "gpt-4o-mini"
+
+    # --- Voice / music (py-tgcalls + yt-dlp, ported from AnvuMusic) ----------
+    # The music engine degrades instead of failing: without py-tgcalls the queue,
+    # the cards and the web panel still work, they just do not make sound.
+    voice_enabled: bool = True
+    voice_backend: VoiceBackendMode = "auto"
+    voice_quality: str = "high"
+    voice_default_volume: int = Field(default=80, ge=0, le=200)
+    voice_autoleave_sec: int = Field(default=300, ge=0)
+    voice_max_duration_min: int = Field(default=0, ge=0)
+    voice_queue_limit: int = Field(default=100, gt=0)
+    voice_tick_sec: float = Field(default=5.0, ge=1.0)
+    voice_download_dir: Path = Path("data/downloads/voice")
+    voice_cache_dir: Path = Path("data/cache")
+    #: Netscape cookies.txt - YouTube asks for one on datacenter IPs
+    cookies_file: Path | None = None
+    http_proxy: str = ""
 
     # --- Web control panel (dashboard served by the keep-alive port) ---------
     web_dashboard: bool = True
@@ -214,7 +233,12 @@ class Settings(BaseSettings):
 
     @property
     def temp_dir_list(self) -> list[Path]:
-        return [Path(p.strip()) for p in self.temp_dirs.split(",") if p.strip()]
+        """Directories the watchdog may sweep - temp files plus the media caches."""
+        paths = [Path(p.strip()) for p in self.temp_dirs.split(",") if p.strip()]
+        for extra in (self.voice_download_dir, self.voice_cache_dir):
+            if extra not in paths:
+                paths.append(extra)
+        return paths
 
     @property
     def resolved_keep_alive_url(self) -> str:

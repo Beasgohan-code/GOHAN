@@ -210,7 +210,7 @@ def _reply_to(message: Message):
 # ---------------------------------------------------------------------------
 
 
-@router.message(Command(commands=["games", "play"]), IsGroup())
+@router.message(Command(commands=["games", "game", "lobby", "playgame"]), IsGroup())
 async def cmd_games(message: Message, bot: Bot, db: Database) -> None:
     """The games hub."""
     stats = await db.game_stats(message.chat.id)

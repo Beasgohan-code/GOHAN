@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import time
 from pathlib import Path
 
@@ -491,3 +492,119 @@ async def test_group_settings_editor_and_bulk_apply(tmp_path: Path) -> None:
             await client.close()
     finally:
         await db.close()
+
+
+# ---------------------------------------------------------------------------
+#  music
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_music_page_data_in_demo_mode() -> None:
+    state = build_state(Settings(bot_name="GOHAN"), None, {}, demo=True)
+    client = await make_client(state)
+    await client.start_server()
+    try:
+        response = await client.get("/api/music")
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["ok"] is True and payload["demo"] is True
+        assert payload["playing"] == 1 and payload["queued"] == 3
+
+        room = payload["rooms"][0]
+        assert room["state"]["title"] and room["state"]["progress_text"]
+        assert room["queue"]["size"] == 3
+        assert room["queue"]["tracks"][0]["position"] == 1
+        assert "stream_url" not in json.dumps(room), "never leak stream urls to the browser"
+
+        assert {"id", "name", "owner", "tracks"} <= set(payload["playlists"][0])
+        assert payload["capabilities"]["note"]  # always tells you what is missing
+        assert payload["controllers"], "the demo shows who may drive the player"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_music_actions_from_the_browser() -> None:
+    state = build_state(Settings(), None, {}, demo=True)
+    client = await make_client(state)
+    await client.start_server()
+    try:
+        overview = await (await client.get("/api/music")).json()
+        chat_id = overview["rooms"][0]["state"]["chat_id"]
+
+        for action in ("toggle", "skip", "stop", "replay", "shuffle", "clear"):
+            response = await client.post(f"/api/music/{chat_id}/actions/{action}", json={})
+            assert response.status == 200, action
+            result = await response.json()
+            assert result["ok"] and result["action"] == action and result["demo"]
+
+        for action, body in (("volume", {"value": 120}), ("seek", {"seconds": 30}), ("loop", {"mode": "queue"})):
+            assert (await client.post(f"/api/music/{chat_id}/actions/{action}", json=body)).status == 200
+
+        assert (await client.post(f"/api/music/{chat_id}/actions/explode", json={})).status in (400, 404)
+        assert (await client.post("/api/music/not-a-number/actions/skip", json={})).status == 400
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_playlist_delete_from_the_browser() -> None:
+    settings = Settings()
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        state = build_state(settings, db, {"settings": settings})
+        await db.upsert_user(42, username="owner", first_name="Owner")
+        playlist_id = await db.create_playlist(42, "road trip")
+        await db.add_playlist_tracks(playlist_id, [{"title": "A"}, {"title": "B"}])
+
+        client = await make_client(state)
+        await client.start_server()
+        try:
+            payload = await (await client.get("/api/music")).json()
+            assert [p["name"] for p in payload["playlists"]] == ["road trip"]
+
+            response = await client.post(f"/api/playlists/{playlist_id}/delete", json={})
+            assert response.status == 200
+            result = await response.json()
+            assert result["ok"] and result["removed_tracks"] == 2
+
+            assert (await (await client.get("/api/music")).json())["playlists"] == []
+            assert (await client.post("/api/playlists/not-a-number/delete", json={})).status == 400
+        finally:
+            await client.close()
+    finally:
+        await db.close()
+
+
+# ---------------------------------------------------------------------------
+#  the panel javascript
+# ---------------------------------------------------------------------------
+
+APP_JS = Path(__file__).resolve().parents[1] / "gohan" / "web" / "static" / "app.js"
+
+
+def _defined(source: str, name: str) -> bool:
+    return bool(re.search(rf"(?:function|const|let|var)\s+{re.escape(name)}\b", source))
+
+
+def test_every_panel_page_has_a_renderer() -> None:
+    """A `render:` pointing at a function that was never written kills the whole
+    panel with a ReferenceError before it can boot, so guard it here."""
+    source = APP_JS.read_text(encoding="utf-8")
+    start = source.index("const PAGES = {")
+    pages = re.findall(r"(\w+):\s*\{[^}]*?render:\s*(\w+)", source[start : source.index("};", start)])
+    assert len(pages) >= 8, pages
+    for page, renderer in pages:
+        assert _defined(source, renderer), f"PAGES.{page} renders with undefined {renderer}()"
+
+    # helpers the delegated click handler and the live case search rely on
+    for helper in ("caseRow", "matchCase", "musicRoomCard", "userAction", "openUser", "openGroup"):
+        assert _defined(source, helper), f"{helper} is referenced but never defined"
+
+
+def test_panel_static_files_are_served() -> None:
+    for name in ("index.html", "app.js", "style.css"):
+        path = APP_JS.parent / name
+        assert path.exists() and path.stat().st_size > 500, name

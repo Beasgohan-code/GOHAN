@@ -47,6 +47,7 @@ from .services.keep_alive import KeepAlive
 from .services.log_channel import LogChannel
 from .services.watchdog import Watchdog
 from .storage import Database
+from .voice import AfkWatcher, build_player
 
 log = get_logger("dispatcher")
 
@@ -82,8 +83,10 @@ class GohanBot:
     log_channel: LogChannel | None = None
     keep_alive: KeepAlive | None = None
     mtproto: Any = None
+    player: Any = None
     started_at: float = field(default_factory=time.time)
     routers: list[str] = field(default_factory=list)
+    _voice_task: Any = None
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -111,7 +114,32 @@ class GohanBot:
 
             asyncio.get_running_loop().create_task(self.log_channel.daily_report_loop())
 
+        if self.player is not None:
+            import asyncio
+
+            self._voice_task = asyncio.get_running_loop().create_task(self._voice_beat())
+
+    async def _voice_beat(self) -> None:
+        """Advance finished tracks and let idle rooms go (see Player.tick)."""
+        import asyncio
+
+        interval = max(1.0, float(getattr(self.settings, "voice_tick_sec", 5.0)))
+        while True:
+            try:
+                await self.player.tick()
+            except Exception as exc:  # pragma: no cover - the beat must never die
+                log.debug("voice tick failed: %s", exc)
+            await asyncio.sleep(interval)
+
     async def stop_services(self) -> None:
+        if self._voice_task is not None:
+            self._voice_task.cancel()
+            self._voice_task = None
+        if self.player is not None:
+            try:
+                await self.player.close()
+            except Exception:
+                pass
         if self.keep_alive is not None:
             await self.keep_alive.stop()
         if self.watchdog is not None:
@@ -189,8 +217,15 @@ def build_services(settings: Settings, db: Database, bot: Bot) -> dict[str, Any]
     log_channel = LogChannel(settings, db, bot)
     mtproto = build_bridge(settings)
 
+    from .voice.handlers import make_panel_hook
+
+    player = build_player(settings, db=db, mtproto=mtproto, hook=make_panel_hook(bot))
+    afk = AfkWatcher(db, bot)
+
     return {
         "ai": ai,
+        "player": player,
+        "afk": afk,
         "llm": llm,
         "store": conversations,
         "animations": animations,
@@ -252,6 +287,7 @@ def build_dispatcher(
     from .handlers import ai as ai_handlers
     from .handlers import filters as filter_handlers
     from .handlers import general, owner
+    from .voice import handlers as voice_handlers
 
     # Module-level routers can only be attached to one Dispatcher, ever. Rather
     # than leak that constraint to callers (--check and the test-suite both build
@@ -268,6 +304,7 @@ def build_dispatcher(
         games_module,
         anime_module,
         music_module,
+        voice_handlers,
         ai_handlers,
         guardian_events,
     ):
@@ -294,7 +331,8 @@ def build_dispatcher(
         fun_module.router,        # /hug … /actions, /setgif
         games_module.router,      # /quiz, /guess, /chain, /dice, /slot, /top
         anime_module.router,      # /anime, /trending, /character
-        music_module.router,      # /music, /download
+        music_module.router,      # /music, /download (files, no voice chat)
+        voice_handlers.router,    # /play, /queue, /loop, playlists, v:* buttons
         ai_handlers.router,       # /ask, /ai, /translate, /summary
         guardian_events.trigger_router,  # filters - before the guard, by design
         guardian_events.router,   # live guard - always last
@@ -316,6 +354,12 @@ def build_dispatcher(
     dp.update.outer_middleware(UsageMiddleware(services["db"], rich_default=settings.rich_default))
     dp.message.middleware(ThrottleMiddleware(settings.throttle_delay))
     dp.callback_query.middleware(ThrottleMiddleware(0.3))
+
+    # Away mode runs *before* routing but hands the update on, so a member who
+    # comes back is greeted and still gets an answer to what they just said.
+    afk = services.get("afk")
+    if afk is not None:
+        dp.message.outer_middleware(afk)
 
     return dp, order
 
@@ -376,6 +420,7 @@ async def build_runtime(settings: Settings) -> GohanBot:
     runtime = GohanBot(
         settings=settings,
         bot=bot,
+        player=services["player"],
         dispatcher=dp,
         db=db,
         animations=services["animations"],

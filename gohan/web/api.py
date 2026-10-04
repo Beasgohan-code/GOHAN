@@ -14,6 +14,9 @@ Route map::
     GET  /api/modules          the module registry with current state
     POST /api/modules/{key}    toggle a global switch
     POST /api/modules/{key}/apply-all    turn a chat module on/off in every group
+    GET  /api/music            voice rooms, playlists, controllers, AFK
+    POST /api/music/{chat_id}/actions/{action}   player control from the browser
+    POST /api/playlists/{id}/delete              drop a playlist
     GET  /api/moderation       warning counts, a per-day chart and recent cases
     GET  /api/users            search users (q, banned)
     GET  /api/users/{id}       one user: warnings, groups, scores
@@ -157,6 +160,27 @@ class WebAPI:
 
     async def modules(self, request: web.Request) -> web.Response:
         return _json({"ok": True, "modules": await self.state.modules_payload(), "demo": self.state.demo})
+
+    async def music(self, request: web.Request) -> web.Response:
+        return _json(await self.state.music())
+
+    async def music_action(self, request: web.Request) -> web.Response:
+        try:
+            chat_id = int(request.match_info["chat_id"])
+        except ValueError:
+            return _json({"ok": False, "error": "bad chat id"}, 400)
+        action = request.match_info["action"]
+        body = await self._body(request)
+        result = await self.state.music_action(chat_id, action, body)
+        return _json(result, 200 if result.get("ok") else 400)
+
+    async def delete_playlist(self, request: web.Request) -> web.Response:
+        try:
+            playlist_id = int(request.match_info["playlist_id"])
+        except ValueError:
+            return _json({"ok": False, "error": "bad playlist id"}, 400)
+        result = await self.state.delete_playlist(playlist_id)
+        return _json(result, 200 if result.get("ok") else 400)
 
     async def moderation(self, request: web.Request) -> web.Response:
         days = int(request.query.get("days", 7) or 7)
@@ -339,6 +363,7 @@ class WebAPI:
         app.router.add_get("/api/groups", g(self.groups))
         app.router.add_get("/api/groups/{chat_id}", g(self.group))
         app.router.add_get("/api/modules", g(self.modules))
+        app.router.add_get("/api/music", g(self.music))
         app.router.add_get("/api/moderation", g(self.moderation))
         app.router.add_get("/api/users", g(self.users))
         app.router.add_get("/api/users/{user_id}", g(self.user))
@@ -350,6 +375,8 @@ class WebAPI:
         app.router.add_patch("/api/groups/{chat_id}/settings", g(self.edit_group_settings))
         app.router.add_post("/api/users/{user_id}/actions/{action}", g(self.user_action))
         app.router.add_post("/api/modules/{key}/apply-all", g(self.apply_module_all))
+        app.router.add_post("/api/music/{chat_id}/actions/{action}", g(self.music_action))
+        app.router.add_post("/api/playlists/{playlist_id}/delete", g(self.delete_playlist))
         app.router.add_post("/api/modules/{key}", g(self.toggle_module))
         app.router.add_post("/api/actions/{name}", g(self.action))
         app.router.add_post("/api/auth/login", self.login)

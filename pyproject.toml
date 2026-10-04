@@ -23,6 +23,11 @@ dependencies = [
 # C-speed MTProto crypto + libc-ares resolver for Kurigram.
 fast = ["TgCrypto>=1.2.5"]
 # Music downloads (/music, /download). Needs the ffmpeg binary on the host too.
+voice = [
+    "py-tgcalls>=2.2",
+    "yt-dlp>=2024.8.6",
+    "ffmpeg-python>=0.2",
+]
 media = ["yt-dlp>=2024.8.6"]
 dev = [
     "pytest>=8",
