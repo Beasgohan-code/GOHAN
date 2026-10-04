@@ -1,0 +1,4 @@
+aiogram==3.31.0
+kurigram[fast]==2.2.26
+python-dotenv==1.2.4
+aiosqlite==0.22.1
